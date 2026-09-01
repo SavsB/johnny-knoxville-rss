@@ -43,7 +43,25 @@ INDEX_FILE = os.path.join(
     "index.html"
 )
 
+# Maximum number of posts kept in the database.
 MAX_POSTS = 500
+
+# Maximum number of Tumblr pages to try for EACH query.
+#
+# Page 1 = the normal search results.
+# Page 2 = /page/2
+# Page 3 = /page/3
+# etc.
+#
+# Start conservatively. We can increase this later.
+MAX_PAGES_PER_QUERY = 5
+
+# How many pages returning only duplicates we tolerate
+# before stopping.
+#
+# This protects us if Tumblr ignores /page/N and keeps
+# returning the same 15 posts.
+MAX_EMPTY_PAGES = 1
 
 
 HEADERS = {
@@ -51,7 +69,12 @@ HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/139.0 Safari/537.36"
-    )
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,"
+        "application/xml;q=0.9,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 
@@ -207,7 +230,7 @@ def get_post_title(post):
         []
     )
 
-    # First look for Tumblr heading blocks.
+    # Look for Tumblr heading blocks first.
     if isinstance(content, list):
 
         for block in content:
@@ -236,7 +259,7 @@ def get_post_title(post):
                 if text:
                     return text[:200]
 
-    # Tumblr's summary is usually a good fallback.
+    # Summary is the next best option.
     summary = clean_text(
         post.get(
             "summary",
@@ -247,7 +270,7 @@ def get_post_title(post):
     if summary:
         return summary[:200]
 
-    # Try the first text block.
+    # Try first text block.
     if isinstance(content, list):
 
         for block in content:
@@ -267,7 +290,7 @@ def get_post_title(post):
                 if text:
                     return text[:200]
 
-    # Last fallback: Tumblr slug.
+    # Final fallback: slug.
     slug = clean_text(
         post.get(
             "slug",
@@ -298,9 +321,12 @@ def get_post_excerpt(post):
     if not text:
         return ""
 
-    # Keep RSS descriptions reasonably short.
     if len(text) > 400:
-        text = text[:400].rstrip() + "..."
+
+        text = (
+            text[:400].rstrip()
+            + "..."
+        )
 
     return text
 
@@ -349,21 +375,91 @@ def extract_initial_state(html_text):
 
 
 # ============================================================
-# SEARCH TUMBLR
+# CONVERT A TUMBLR POST INTO OUR DATABASE FORMAT
 # ============================================================
 
-def search_tumblr(query):
+def convert_post(
+    post,
+    query
+):
 
-    url = (
-        "https://www.tumblr.com/search/"
-        + quote(query)
+    post_url = post.get(
+        "postUrl",
+        ""
     )
+
+    if not post_url:
+        return None
+
+    post_url = post_url.split(
+        "?"
+    )[0]
+
+    return {
+
+        "url": post_url,
+
+        "title": get_post_title(
+            post
+        ),
+
+        "excerpt": get_post_excerpt(
+            post
+        ),
+
+        "query": query,
+
+        "timestamp": post.get(
+            "timestamp",
+            0
+        ),
+
+        "blog": post.get(
+            "blogName",
+            ""
+        ),
+
+        "tags": post.get(
+            "tags",
+            []
+        ),
+    }
+
+
+# ============================================================
+# SEARCH ONE TUMBLR PAGE
+# ============================================================
+
+def search_tumblr_page(
+    query,
+    page
+):
+
+    encoded_query = quote(
+        query
+    )
+
+    if page == 1:
+
+        url = (
+            "https://www.tumblr.com/search/"
+            + encoded_query
+        )
+
+    else:
+
+        url = (
+            "https://www.tumblr.com/search/"
+            + encoded_query
+            + f"/page/{page}"
+        )
 
     print()
-    print("=" * 50)
     print(
-        f"Searching: {query}"
+        f"Searching: {query} "
+        f"(page {page})"
     )
+
     print(
         f"URL: {url}"
     )
@@ -385,18 +481,6 @@ def search_tumblr(query):
             f"Response length: "
             f"{len(response.text)}"
         )
-
-        # Save the latest Tumblr response
-        # for troubleshooting.
-        with open(
-            "tumblr_debug.html",
-            "w",
-            encoding="utf-8"
-        ) as f:
-
-            f.write(
-                response.text
-            )
 
         if response.status_code != 200:
 
@@ -424,116 +508,37 @@ def search_tumblr(query):
         )
 
         results = []
+
         seen = set()
 
         for post in raw_posts:
 
-            post_url = post.get(
-                "postUrl",
-                ""
+            converted = convert_post(
+                post,
+                query
             )
 
-            if not post_url:
-
+            if not converted:
                 continue
 
-            post_url = post_url.split(
-                "?"
-            )[0]
+            post_url = converted[
+                "url"
+            ]
 
             if post_url in seen:
-
                 continue
 
             seen.add(
                 post_url
             )
 
-            # ------------------------------------------------
-            # Tumblr tags
-            # ------------------------------------------------
-
-            tags = post.get(
-                "tags",
-                []
+            results.append(
+                converted
             )
-
-            tag_text = ""
-
-            if isinstance(tags, list):
-
-                tag_text = " ".join(
-                    str(tag)
-                    for tag in tags
-                ).lower()
-
-            elif isinstance(tags, str):
-
-                tag_text = tags.lower()
-
-            # ------------------------------------------------
-            # Tumblr post text
-            # ------------------------------------------------
-
-            post_text = get_post_text(
-                post
-            ).lower()
-
-            summary = clean_text(
-                post.get(
-                    "summary",
-                    ""
-                )
-            ).lower()
-
-            searchable_text = " ".join([
-                tag_text,
-                post_text,
-                summary
-            ])
-
-            # ------------------------------------------------
-            # Relevance detection
-            # ------------------------------------------------
-            #
-            # We don't reject posts here based on the query.
-            #
-            # Tumblr already performed the search.
-            #
-            # These values are stored so we can later see
-            # why the post was discovered.
-            # ------------------------------------------------
-
-            results.append({
-
-                "url": post_url,
-
-                "title": get_post_title(
-                    post
-                ),
-
-                "excerpt": get_post_excerpt(
-                    post
-                ),
-
-                "query": query,
-
-                "timestamp": post.get(
-                    "timestamp",
-                    0
-                ),
-
-                "blog": post.get(
-                    "blogName",
-                    ""
-                ),
-
-                "tags": tags,
-            })
 
         print(
             f"Found {len(results)} "
-            f"unique posts."
+            f"unique posts on page {page}."
         )
 
         return results
@@ -546,53 +551,180 @@ def search_tumblr(query):
 
         return []
 
+
+# ============================================================
+# SEARCH TUMBLR WITH PAGINATION
+# ============================================================
+
+def search_tumblr(query):
+
+    all_results = []
+
+    seen_urls = set()
+
+    empty_pages = 0
+
+    for page in range(
+        1,
+        MAX_PAGES_PER_QUERY + 1
+    ):
+
+        results = search_tumblr_page(
+            query,
+            page
+        )
+
+        # No results at all means we've reached
+        # the end or Tumblr rejected the page.
+        if not results:
+
+            print(
+                f"No results on page {page}."
+            )
+
+            break
+
+        new_on_page = 0
+
+        for post in results:
+
+            url = post.get(
+                "url",
+                ""
+            )
+
+            if not url:
+                continue
+
+            if url in seen_urls:
+                continue
+
+            seen_urls.add(
+                url
+            )
+
+            all_results.append(
+                post
+            )
+
+            new_on_page += 1
+
+        print(
+            f"New posts from page {page}: "
+            f"{new_on_page}"
+        )
+
+        # If Tumblr gave us a page but every post
+        # was already seen, pagination probably isn't
+        # advancing.
+        if new_on_page == 0:
+
+            empty_pages += 1
+
+            print(
+                "Page contained only "
+                "duplicate posts."
+            )
+
+            if empty_pages >= MAX_EMPTY_PAGES:
+
+                print(
+                    "Stopping pagination because "
+                    "Tumblr appears to be returning "
+                    "the same results."
+                )
+
+                break
+
+        else:
+
+            empty_pages = 0
+
+    print()
+    print(
+        f"TOTAL UNIQUE RESULTS FOR "
+        f"'{query}': {len(all_results)}"
+    )
+
+    return all_results
+
+
 # ============================================================
 # MERGE OLD + NEW POSTS
 # ============================================================
 
-def merge_posts(existing, new_posts):
+def merge_posts(
+    existing,
+    new_posts
+):
 
-    # Start with a complete copy of the existing database.
-    merged = list(existing)
+    # Start with ALL existing posts.
+    merged = list(
+        existing
+    )
 
-    # Build a set of existing URLs for duplicate checking.
     existing_urls = set()
 
     for post in existing:
 
-        url = post.get("url", "").strip()
+        url = post.get(
+            "url",
+            ""
+        ).strip()
 
         if url:
-            existing_urls.add(url)
+
+            existing_urls.add(
+                url
+            )
 
     new_count = 0
 
     for post in new_posts:
 
-        url = post.get("url", "").strip()
+        url = post.get(
+            "url",
+            ""
+        ).strip()
 
         if not url:
             continue
 
-        # Only add posts that aren't already stored.
         if url not in existing_urls:
 
-            post["added"] = datetime.now(
-                timezone.utc
-            ).isoformat()
+            post["added"] = (
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+            )
 
-            merged.append(post)
+            merged.append(
+                post
+            )
 
-            existing_urls.add(url)
+            existing_urls.add(
+                url
+            )
 
             new_count += 1
 
-    # Sort by Tumblr timestamp, newest first.
+    # Sort newest first.
     def sort_key(post):
 
         try:
-            return int(post.get("timestamp", 0) or 0)
-        except (ValueError, TypeError):
+
+            return int(
+                post.get(
+                    "timestamp",
+                    0
+                ) or 0
+            )
+
+        except (
+            ValueError,
+            TypeError
+        ):
+
             return 0
 
     merged.sort(
@@ -600,20 +732,25 @@ def merge_posts(existing, new_posts):
         reverse=True
     )
 
+    print()
     print(
-        f"Existing posts preserved: {len(existing)}"
+        f"Existing posts preserved: "
+        f"{len(existing)}"
     )
 
     print(
-        f"New posts added: {new_count}"
+        f"New posts added: "
+        f"{new_count}"
     )
 
     print(
-        f"Total after merge: {len(merged)}"
+        f"Total after merge: "
+        f"{len(merged)}"
     )
 
-    # Only limit the feed/database if it exceeds MAX_POSTS.
     return merged[:MAX_POSTS]
+
+
 # ============================================================
 # CREATE RSS XML
 # ============================================================
@@ -625,12 +762,7 @@ def make_rss(posts):
         exist_ok=True
     )
 
-    # Register the Atom namespace.
-    # ElementTree will automatically write:
-    #
-    # xmlns:atom="http://www.w3.org/2005/Atom"
-    #
-    # Do NOT manually add xmlns:atom to the rss element.
+    # Register Atom namespace.
     ET.register_namespace(
         "atom",
         "http://www.w3.org/2005/Atom"
@@ -818,6 +950,8 @@ def make_rss(posts):
         f"RSS feed created with "
         f"{len(posts)} posts."
     )
+
+
 # ============================================================
 # CREATE HTML INDEX
 # ============================================================
@@ -944,6 +1078,10 @@ def main():
     )
 
     all_new = []
+
+    # ========================================================
+    # RUN EVERY SEARCH
+    # ========================================================
 
     for query in QUERIES:
 
