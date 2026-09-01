@@ -560,18 +560,12 @@ def make_rss(posts):
         exist_ok=True
     )
 
-    # IMPORTANT:
-    # Register the Atom namespace before creating
-    # the XML document.
+    # Register the Atom namespace.
+    # ElementTree will automatically write:
     #
-    # Without this, ElementTree can produce:
+    # xmlns:atom="http://www.w3.org/2005/Atom"
     #
-    #   <ns0:link>
-    #
-    # Instead we want:
-    #
-    #   <atom:link>
-    #
+    # Do NOT manually add xmlns:atom to the rss element.
     ET.register_namespace(
         "atom",
         "http://www.w3.org/2005/Atom"
@@ -580,9 +574,7 @@ def make_rss(posts):
     rss = ET.Element(
         "rss",
         {
-            "version": "2.0",
-            "xmlns:atom":
-                "http://www.w3.org/2005/Atom"
+            "version": "2.0"
         }
     )
 
@@ -761,8 +753,6 @@ def make_rss(posts):
         f"RSS feed created with "
         f"{len(posts)} posts."
     )
-
-
 # ============================================================
 # CREATE HTML INDEX
 # ============================================================
