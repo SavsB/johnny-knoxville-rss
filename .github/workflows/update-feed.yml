@@ -1,8 +1,9 @@
 name: Update Tumblr RSS Feed
 
 on:
-  workflow_dispatch:
   
+  workflow_dispatch:
+
 permissions:
   contents: write
   pages: write
