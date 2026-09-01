@@ -2,7 +2,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -29,14 +29,42 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/131.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,*/*;q=0.8"
+    ),
 }
+
+
+def clean_text(text):
+    """Clean whitespace and HTML-ish text."""
+
+    if not text:
+        return ""
+
+    text = BeautifulSoup(text, "html.parser").get_text(" ", strip=True)
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
+
+
+def shorten(text, length=300):
+    """Create a short RSS description."""
+
+    text = clean_text(text)
+
+    if len(text) <= length:
+        return text
+
+    return text[:length].rsplit(" ", 1)[0] + "…"
 
 
 def load_posts():
     if DATA_FILE.exists():
         try:
-            return json.loads(DATA_FILE.read_text(encoding="utf-8"))
+            return json.loads(
+                DATA_FILE.read_text(encoding="utf-8")
+            )
         except Exception:
             pass
 
@@ -45,94 +73,219 @@ def load_posts():
 
 def save_posts(posts):
     DATA_FILE.write_text(
-        json.dumps(posts, indent=2, ensure_ascii=False),
+        json.dumps(
+            posts,
+            indent=2,
+            ensure_ascii=False
+        ),
         encoding="utf-8"
     )
 
 
-def extract_post_urls(html):
+def extract_tumblr_data(html):
     """
-    Extract Tumblr post URLs from both normal HTML links
-    and Tumblr's embedded page data.
+    Extract post URLs and useful text from Tumblr's search HTML.
+
+    Tumblr has changed its search page structure several times,
+    so this intentionally uses several extraction methods.
     """
 
-    urls = set()
+    results = {}
 
-    # Normal HTML links
     soup = BeautifulSoup(html, "html.parser")
 
-    for tag in soup.find_all("a", href=True):
-        href = tag.get("href", "")
+    # ---------------------------------------------------------
+    # 1. Normal links
+    # ---------------------------------------------------------
 
-        if "tumblr.com" in href and "/post/" in href:
-            href = href.split("?")[0]
-            urls.add(href)
+    for link in soup.find_all("a", href=True):
 
-    # Raw HTML / embedded JSON
+        href = link.get("href", "")
+
+        if "/post/" not in href:
+            continue
+
+        if not href.startswith("http"):
+            continue
+
+        href = href.split("?")[0]
+
+        text = clean_text(link.get_text(" ", strip=True))
+
+        if not text:
+            text = "Johnny Knoxville Tumblr post"
+
+        results[href] = {
+            "link": href,
+            "title": text[:200],
+            "description": text[:500],
+        }
+
+    # ---------------------------------------------------------
+    # 2. Embedded JSON / raw HTML
+    # ---------------------------------------------------------
+
     patterns = [
         r'https?://[A-Za-z0-9_-]+\.tumblr\.com/post/\d+',
         r'https?://www\.tumblr\.com/[A-Za-z0-9_-]+/\d+',
-        r'https?:\\?/\\?/[^"\']+\.tumblr\.com\\?/post\\?/\d+',
     ]
 
     for pattern in patterns:
-        matches = re.findall(pattern, html)
 
-        for url in matches:
-            url = url.replace("\\/", "/")
-            urls.add(url.split("?")[0])
+        for match in re.findall(pattern, html):
 
-    return urls
+            url = match.replace("\\/", "/")
+            url = url.split("?")[0]
+
+            if url not in results:
+
+                results[url] = {
+                    "link": url,
+                    "title": "Johnny Knoxville Tumblr post",
+                    "description": (
+                        "Johnny Knoxville Tumblr search result."
+                    ),
+                }
+
+    # ---------------------------------------------------------
+    # 3. Look for nearby useful text
+    # ---------------------------------------------------------
+
+    for url, item in results.items():
+
+        # Find elements containing the post URL
+        elements = soup.find_all(
+            href=lambda href: href and url in href
+        )
+
+        for element in elements:
+
+            parent = element
+
+            # Search a few levels upward for a useful container
+            for _ in range(4):
+
+                if parent is None:
+                    break
+
+                text = clean_text(
+                    parent.get_text(" ", strip=True)
+                )
+
+                if len(text) > len(item["description"]):
+
+                    item["description"] = shorten(
+                        text,
+                        500
+                    )
+
+                    # Try to find a heading
+                    heading = parent.find(
+                        ["h1", "h2", "h3", "h4", "h5"]
+                    )
+
+                    if heading:
+
+                        heading_text = clean_text(
+                            heading.get_text(
+                                " ",
+                                strip=True
+                            )
+                        )
+
+                        if heading_text:
+                            item["title"] = (
+                                heading_text[:200]
+                            )
+
+                    break
+
+                parent = parent.parent
+
+    return list(results.values())
 
 
 def fetch_query(query):
-    encoded = quote(query)
-    url = f"https://www.tumblr.com/search/{encoded}"
 
+    encoded = quote(query)
+
+    url = (
+        f"https://www.tumblr.com/search/"
+        f"{encoded}"
+    )
+
+    print()
     print(f"Searching Tumblr: {query}")
 
     try:
+
         response = requests.get(
             url,
             headers=HEADERS,
             timeout=30
         )
 
-        print(f"HTTP status: {response.status_code}")
-        print(f"Downloaded: {len(response.text)} bytes")
+        print(
+            f"HTTP status: {response.status_code}"
+        )
+
+        print(
+            f"Downloaded: {len(response.text)} bytes"
+        )
 
         response.raise_for_status()
 
-        urls = extract_post_urls(response.text)
+        results = extract_tumblr_data(
+            response.text
+        )
 
-        print(f"Found {len(urls)} possible posts")
+        print(
+            f"Found {len(results)} possible posts"
+        )
 
-        return urls
+        return results
 
     except Exception as exc:
-        print(f"ERROR searching '{query}': {exc}")
-        return set()
+
+        print(
+            f"ERROR searching '{query}': {exc}"
+        )
+
+        return []
 
 
 def create_feed(posts):
-    OUTPUT_DIR.mkdir(exist_ok=True)
+
+    OUTPUT_DIR.mkdir(
+        exist_ok=True
+    )
 
     feed = FeedGenerator()
 
     feed.id(SITE_URL)
-    feed.title("Johnny Knoxville Fanfiction — Tumblr")
+
+    feed.title(
+        "Johnny Knoxville Fanfiction — Tumblr"
+    )
+
     feed.link(
-        href="https://www.tumblr.com/search/johnny%20knoxville%20x%20reader",
+        href=(
+            "https://www.tumblr.com/"
+            "search/johnny%20knoxville%20x%20reader"
+        ),
         rel="alternate"
     )
+
     feed.link(
         href=f"{SITE_URL}feed.xml",
         rel="self"
     )
+
     feed.description(
-        "Tumblr search results for Johnny Knoxville fanfiction, "
-        "x-reader, imagines, and related posts."
+        "Tumblr search results for Johnny Knoxville "
+        "fanfiction, x-reader, imagines and related posts."
     )
+
     feed.language("en")
 
     for post in posts[:100]:
@@ -141,37 +294,71 @@ def create_feed(posts):
 
         title = post.get(
             "title",
-            "Johnny Knoxville fanfiction — Tumblr"
+            "Johnny Knoxville Tumblr post"
         )
 
-        entry.id(post["link"])
+        description = post.get(
+            "description",
+            "Johnny Knoxville Tumblr search result."
+        )
+
+        link = post["link"]
+
+        # Avoid generic duplicate-looking titles
+        if not title or len(title) < 4:
+            title = (
+                "Johnny Knoxville Tumblr post"
+            )
+
+        entry.id(link)
+
         entry.title(title)
-        entry.link(href=post["link"])
 
-        description = (
-            f"Johnny Knoxville fanfiction / x-reader result "
-            f"found through Tumblr search.<br><br>"
-            f"<a href=\"{post['link']}\">Open Tumblr post</a>"
+        entry.link(
+            href=link
         )
 
-        entry.description(description)
+        rss_description = (
+            f"{description}<br><br>"
+            f"<a href=\"{link}\">"
+            f"Read this post on Tumblr →"
+            f"</a>"
+        )
 
-        published = post.get("published")
+        entry.description(
+            rss_description
+        )
+
+        published = post.get(
+            "published"
+        )
 
         if published:
+
             try:
+
                 dt = datetime.fromisoformat(
-                    published.replace("Z", "+00:00")
+                    published.replace(
+                        "Z",
+                        "+00:00"
+                    )
                 )
+
                 entry.pubDate(dt)
+
             except Exception:
                 pass
 
-    feed.rss_file(str(OUTPUT_FILE))
+    feed.rss_file(
+        str(OUTPUT_FILE)
+    )
 
 
 def create_index():
-    OUTPUT_DIR.mkdir(exist_ok=True)
+
+    OUTPUT_DIR.mkdir(
+        exist_ok=True
+    )
 
     html = """<!DOCTYPE html>
 <html lang="en">
@@ -179,23 +366,30 @@ def create_index():
 <meta charset="UTF-8">
 <title>Johnny Knoxville Tumblr RSS</title>
 </head>
+
 <body>
+
 <h1>Johnny Knoxville Tumblr RSS</h1>
 
 <p>
-This page provides an RSS feed containing Tumblr search results
-for Johnny Knoxville fanfiction, x-reader, imagines, and related posts.
+This feed collects Tumblr search results for
+Johnny Knoxville fanfiction, x-reader,
+imagines and related posts.
 </p>
 
 <p>
-<a href="feed.xml">RSS Feed</a>
+<a href="feed.xml">
+Open RSS Feed
+</a>
 </p>
 
 </body>
 </html>
 """
 
-    (OUTPUT_DIR / "index.html").write_text(
+    (
+        OUTPUT_DIR / "index.html"
+    ).write_text(
         html,
         encoding="utf-8"
     )
@@ -205,50 +399,142 @@ def main():
 
     existing = load_posts()
 
-    # Existing posts indexed by URL
-    posts_by_url = {
-        post["link"]: post
-        for post in existing
-        if "link" in post
-    }
+    posts_by_url = {}
 
-    found_urls = set()
+    # ---------------------------------------------------------
+    # Keep everything we've already found
+    # ---------------------------------------------------------
+
+    for post in existing:
+
+        if "link" in post:
+
+            posts_by_url[
+                post["link"]
+            ] = post
+
+    # ---------------------------------------------------------
+    # Search Tumblr
+    # ---------------------------------------------------------
+
+    new_results = []
 
     for query in QUERIES:
-        found_urls.update(fetch_query(query))
 
-    now = datetime.now(timezone.utc).isoformat()
+        results = fetch_query(
+            query
+        )
 
-    for url in found_urls:
+        new_results.extend(
+            results
+        )
 
-        if url not in posts_by_url:
+    # ---------------------------------------------------------
+    # Merge new results
+    # ---------------------------------------------------------
 
-            posts_by_url[url] = {
-                "link": url,
-                "title": "Johnny Knoxville fanfiction — Tumblr",
+    now = datetime.now(
+        timezone.utc
+    ).isoformat()
+
+    for result in new_results:
+
+        link = result["link"]
+
+        if link in posts_by_url:
+
+            # Improve existing metadata if
+            # the newer search result has it.
+
+            existing_post = posts_by_url[
+                link
+            ]
+
+            if (
+                result.get("title")
+                and
+                result["title"]
+                != "Johnny Knoxville Tumblr post"
+            ):
+
+                existing_post["title"] = (
+                    result["title"]
+                )
+
+            if (
+                result.get("description")
+                and
+                len(result["description"])
+                >
+                len(
+                    existing_post.get(
+                        "description",
+                        ""
+                    )
+                )
+            ):
+
+                existing_post["description"] = (
+                    result["description"]
+                )
+
+        else:
+
+            posts_by_url[link] = {
+
+                "link": link,
+
+                "title": result.get(
+                    "title",
+                    "Johnny Knoxville Tumblr post"
+                ),
+
+                "description": result.get(
+                    "description",
+                    "Johnny Knoxville Tumblr search result."
+                ),
+
                 "published": now,
             }
 
-    posts = list(posts_by_url.values())
+    posts = list(
+        posts_by_url.values()
+    )
 
-    # Newest discovered posts first
+    # ---------------------------------------------------------
+    # Sort newest discovered first
+    # ---------------------------------------------------------
+
     posts.sort(
-        key=lambda x: x.get("published", ""),
+        key=lambda post:
+        post.get(
+            "published",
+            ""
+        ),
         reverse=True
     )
 
+    # ---------------------------------------------------------
     # Keep database manageable
+    # ---------------------------------------------------------
+
     posts = posts[:500]
 
     save_posts(posts)
+
     create_feed(posts)
+
     create_index()
 
     print()
-    print("=" * 50)
-    print(f"TOTAL POSTS IN DATABASE: {len(posts)}")
-    print(f"NEW POSTS FOUND THIS RUN: {len(found_urls)}")
-    print("=" * 50)
+    print("=" * 60)
+    print(
+        f"TOTAL POSTS IN DATABASE: {len(posts)}"
+    )
+    print(
+        f"RESULTS FOUND THIS RUN: {len(new_results)}"
+    )
+    print("=" * 60)
 
 
 if __name__ == "__main__":
