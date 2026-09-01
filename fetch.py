@@ -276,6 +276,7 @@ def merge_posts(existing, new_posts):
 
     posts_by_url = {}
 
+    # Add all existing posts first.
     for post in existing:
 
         url = post.get("url")
@@ -285,6 +286,7 @@ def merge_posts(existing, new_posts):
 
     new_count = 0
 
+    # Add only genuinely new posts.
     for post in new_posts:
 
         url = post.get("url")
@@ -303,33 +305,47 @@ def merge_posts(existing, new_posts):
 
         else:
 
+            # Keep the old post, but improve missing information.
             existing_post = posts_by_url[url]
 
-            new_title = post.get(
-                "title",
-                ""
-            )
+            new_title = post.get("title", "")
 
             if (
                 new_title
                 and new_title != "Tumblr post"
+                and (
+                    not existing_post.get("title")
+                    or existing_post.get("title") == "Tumblr post"
+                )
             ):
                 existing_post["title"] = new_title
 
+            if (
+                not existing_post.get("timestamp")
+                and post.get("timestamp")
+            ):
+                existing_post["timestamp"] = post["timestamp"]
+
+            if (
+                not existing_post.get("blog")
+                and post.get("blog")
+            ):
+                existing_post["blog"] = post["blog"]
+
     posts = list(posts_by_url.values())
 
+    # Sort newest Tumblr posts first.
     posts.sort(
-        key=lambda x: (
-            x.get("timestamp", 0),
-            x.get("added", "")
+        key=lambda post: int(
+            post.get("timestamp", 0) or 0
         ),
         reverse=True
     )
 
-    print(
-        f"New posts added: {new_count}"
-    )
+    print(f"New posts added: {new_count}")
 
+    # IMPORTANT:
+    # Do not accidentally shrink the database.
     return posts[:MAX_POSTS]
 
 
