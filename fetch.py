@@ -154,6 +154,13 @@ def search_tumblr(query):
             "html.parser"
         )
 
+        print("Response length:", len(response.text))
+print("Contains /post/:", "/post/" in response.text)
+print("Contains Tumblr:", "tumblr" in response.text.lower())
+
+with open("tumblr_debug.html", "w", encoding="utf-8") as f:
+    f.write(response.text)
+
         # Use the working post-link extraction method.
         post_urls = extract_post_links(soup)
 
