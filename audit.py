@@ -2,7 +2,7 @@ import json
 import os
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 
@@ -97,7 +97,7 @@ def get_date(post):
         # Unix timestamp
         if isinstance(value, (int, float)):
             try:
-                return datetime.fromtimestamp(value)
+                return datetime.fromtimestamp(value, tz=timezone.utc)
             except Exception:
                 pass
 
@@ -107,11 +107,19 @@ def get_date(post):
             # ISO date/time
             try:
                 cleaned = value.replace("Z", "+00:00")
-                return datetime.fromisoformat(cleaned)
+                dt = datetime.fromisoformat(cleaned)
+
+                # Normalize naive datetimes to UTC.
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+
+                # Normalize timezone-aware datetimes to UTC.
+                return dt.astimezone(timezone.utc)
+
             except Exception:
                 pass
 
-            # Common Tumblr date format
+            # Common Tumblr date formats
             for fmt in (
                 "%Y-%m-%d",
                 "%Y-%m-%d %H:%M:%S",
@@ -119,12 +127,12 @@ def get_date(post):
                 "%Y-%m-%dT%H:%M:%S.%f",
             ):
                 try:
-                    return datetime.strptime(value, fmt)
+                    dt = datetime.strptime(value, fmt)
+                    return dt.replace(tzinfo=timezone.utc)
                 except Exception:
                     pass
 
     return None
-
 
 def get_blog(post):
     for key in (
