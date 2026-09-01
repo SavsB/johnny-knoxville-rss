@@ -60,6 +60,7 @@ jobs:
           git add site/feed.xml
           git add site/index.html
           git add posts.json
+          git add tumblr_debug.html
 
           if git diff --cached --quiet; then
             echo "No changes to commit."
@@ -78,3 +79,5 @@ jobs:
 
       - name: Deploy GitHub Pages
         uses: actions/deploy-pages@v4
+
+        
