@@ -2,18 +2,18 @@ import os
 import re
 import json
 import html
-import requests
 import warnings
-
-warnings.filterwarnings(
-    "ignore",
-    category=MarkupResemblesLocatorWarning
-)
+import requests
 
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
 from datetime import datetime, timezone, date, timedelta
 from urllib.parse import quote
 from xml.etree import ElementTree as ET
+
+warnings.filterwarnings(
+    "ignore",
+    category=MarkupResemblesLocatorWarning
+)
 
 
 # ============================================================
