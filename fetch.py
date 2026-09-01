@@ -1,8 +1,6 @@
 import json
-import os
 import re
 from datetime import datetime, timezone
-from email.utils import format_datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -11,27 +9,37 @@ from bs4 import BeautifulSoup
 from feedgen.feed import FeedGenerator
 
 
-SEARCH_QUERY = "johnny knoxville x reader"
-SEARCH_URL = f"https://www.tumblr.com/search/{quote(SEARCH_QUERY)}"
+QUERIES = [
+    "johnny knoxville x reader",
+    "johnny knoxville reader",
+    "johnny knoxville imagine",
+    "johnny knoxville fic",
+    "johnny knoxville fanfiction",
+    "johnny knoxville x oc",
+]
 
+SITE_URL = "https://savsb.github.io/johnny-knoxville-rss/"
+DATA_FILE = Path("posts.json")
 OUTPUT_DIR = Path("site")
 OUTPUT_FILE = OUTPUT_DIR / "feed.xml"
-DATA_FILE = Path("posts.json")
 
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 Chrome/120 Safari/537.36"
-    )
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
 
-def load_existing_posts():
+def load_posts():
     if DATA_FILE.exists():
         try:
             return json.loads(DATA_FILE.read_text(encoding="utf-8"))
         except Exception:
-            return []
+            pass
+
     return []
 
 
@@ -42,146 +50,205 @@ def save_posts(posts):
     )
 
 
-def get_tumblr_posts():
-    response = requests.get(
-        SEARCH_URL,
-        headers=HEADERS,
-        timeout=30
-    )
+def extract_post_urls(html):
+    """
+    Extract Tumblr post URLs from both normal HTML links
+    and Tumblr's embedded page data.
+    """
 
-    response.raise_for_status()
+    urls = set()
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    # Normal HTML links
+    soup = BeautifulSoup(html, "html.parser")
 
-    posts = []
-    seen = set()
+    for tag in soup.find_all("a", href=True):
+        href = tag.get("href", "")
 
-    # Look for Tumblr post URLs
-    links = soup.find_all("a", href=True)
+        if "tumblr.com" in href and "/post/" in href:
+            href = href.split("?")[0]
+            urls.add(href)
 
-    for link in links:
-        href = link["href"]
+    # Raw HTML / embedded JSON
+    patterns = [
+        r'https?://[A-Za-z0-9_-]+\.tumblr\.com/post/\d+',
+        r'https?://www\.tumblr\.com/[A-Za-z0-9_-]+/\d+',
+        r'https?:\\?/\\?/[^"\']+\.tumblr\.com\\?/post\\?/\d+',
+    ]
 
-        if not href.startswith("http"):
-            continue
+    for pattern in patterns:
+        matches = re.findall(pattern, html)
 
-        # Tumblr post URLs commonly contain /post/
-        if "/post/" not in href:
-            continue
+        for url in matches:
+            url = url.replace("\\/", "/")
+            urls.add(url.split("?")[0])
 
-        # Remove tracking/query parameters
-        clean_url = href.split("?")[0]
+    return urls
 
-        if clean_url in seen:
-            continue
 
-        seen.add(clean_url)
+def fetch_query(query):
+    encoded = quote(query)
+    url = f"https://www.tumblr.com/search/{encoded}"
 
-        text = link.get_text(" ", strip=True)
+    print(f"Searching Tumblr: {query}")
 
-        if not text:
-            text = "Johnny Knoxville x Reader Tumblr Post"
+    try:
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=30
+        )
 
-        posts.append({
-            "title": text[:200],
-            "link": clean_url,
-            "description": (
-                f"Tumblr search result for: {SEARCH_QUERY}"
-            ),
-            "published": datetime.now(timezone.utc).isoformat()
-        })
+        print(f"HTTP status: {response.status_code}")
+        print(f"Downloaded: {len(response.text)} bytes")
 
-    return posts
+        response.raise_for_status()
+
+        urls = extract_post_urls(response.text)
+
+        print(f"Found {len(urls)} possible posts")
+
+        return urls
+
+    except Exception as exc:
+        print(f"ERROR searching '{query}': {exc}")
+        return set()
 
 
 def create_feed(posts):
     OUTPUT_DIR.mkdir(exist_ok=True)
 
-    fg = FeedGenerator()
+    feed = FeedGenerator()
 
-    fg.title("Johnny Knoxville x Reader — Tumblr")
-    fg.link(href=SEARCH_URL)
-    fg.description(
-        "Automatically updated Tumblr search results for "
-        "Johnny Knoxville x Reader."
+    feed.id(SITE_URL)
+    feed.title("Johnny Knoxville Fanfiction — Tumblr")
+    feed.link(
+        href="https://www.tumblr.com/search/johnny%20knoxville%20x%20reader",
+        rel="alternate"
     )
-    fg.language("en")
+    feed.link(
+        href=f"{SITE_URL}feed.xml",
+        rel="self"
+    )
+    feed.description(
+        "Tumblr search results for Johnny Knoxville fanfiction, "
+        "x-reader, imagines, and related posts."
+    )
+    feed.language("en")
 
-    for post in posts[:50]:
-        fe = fg.add_entry()
+    for post in posts[:100]:
 
-        fe.title(post["title"])
-        fe.link(href=post["link"])
-        fe.description(post["description"])
-        fe.guid(post["link"], permalink=True)
+        entry = feed.add_entry()
 
-        try:
-            dt = datetime.fromisoformat(
-                post["published"].replace("Z", "+00:00")
-            )
-            fe.pubDate(format_datetime(dt))
-        except Exception:
-            pass
+        title = post.get(
+            "title",
+            "Johnny Knoxville fanfiction — Tumblr"
+        )
 
-    fg.rss_file(str(OUTPUT_FILE))
+        entry.id(post["link"])
+        entry.title(title)
+        entry.link(href=post["link"])
+
+        description = (
+            f"Johnny Knoxville fanfiction / x-reader result "
+            f"found through Tumblr search.<br><br>"
+            f"<a href=\"{post['link']}\">Open Tumblr post</a>"
+        )
+
+        entry.description(description)
+
+        published = post.get("published")
+
+        if published:
+            try:
+                dt = datetime.fromisoformat(
+                    published.replace("Z", "+00:00")
+                )
+                entry.pubDate(dt)
+            except Exception:
+                pass
+
+    feed.rss_file(str(OUTPUT_FILE))
 
 
-def create_homepage():
-    homepage = OUTPUT_DIR / "index.html"
+def create_index():
+    OUTPUT_DIR.mkdir(exist_ok=True)
 
-    homepage.write_text(
-        """<!DOCTYPE html>
-<html>
+    html = """<!DOCTYPE html>
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>Johnny Knoxville x Reader RSS</title>
+<meta charset="UTF-8">
+<title>Johnny Knoxville Tumblr RSS</title>
 </head>
 <body>
-    <h1>Johnny Knoxville x Reader — Tumblr RSS Feed</h1>
+<h1>Johnny Knoxville Tumblr RSS</h1>
 
-    <p>
-        This feed automatically collects Tumblr search results
-        for Johnny Knoxville x Reader.
-    </p>
+<p>
+This page provides an RSS feed containing Tumblr search results
+for Johnny Knoxville fanfiction, x-reader, imagines, and related posts.
+</p>
 
-    <p>
-        <a href="feed.xml">Open RSS Feed</a>
-    </p>
+<p>
+<a href="feed.xml">RSS Feed</a>
+</p>
+
 </body>
 </html>
-""",
+"""
+
+    (OUTPUT_DIR / "index.html").write_text(
+        html,
         encoding="utf-8"
     )
 
 
 def main():
-    print("Checking Tumblr...")
 
-    existing_posts = load_existing_posts()
+    existing = load_posts()
 
-    try:
-        new_posts = get_tumblr_posts()
-    except Exception as e:
-        print(f"Error fetching Tumblr: {e}")
-        new_posts = []
+    # Existing posts indexed by URL
+    posts_by_url = {
+        post["link"]: post
+        for post in existing
+        if "link" in post
+    }
 
-    # Combine posts without duplicates
-    all_posts = {}
+    found_urls = set()
 
-    for post in existing_posts + new_posts:
-        all_posts[post["link"]] = post
+    for query in QUERIES:
+        found_urls.update(fetch_query(query))
 
-    posts = list(all_posts.values())
+    now = datetime.now(timezone.utc).isoformat()
 
-    # Keep newest 100
-    posts = posts[:100]
+    for url in found_urls:
+
+        if url not in posts_by_url:
+
+            posts_by_url[url] = {
+                "link": url,
+                "title": "Johnny Knoxville fanfiction — Tumblr",
+                "published": now,
+            }
+
+    posts = list(posts_by_url.values())
+
+    # Newest discovered posts first
+    posts.sort(
+        key=lambda x: x.get("published", ""),
+        reverse=True
+    )
+
+    # Keep database manageable
+    posts = posts[:500]
 
     save_posts(posts)
-
     create_feed(posts)
-    create_homepage()
+    create_index()
 
-    print(f"Feed created with {len(posts)} posts.")
+    print()
+    print("=" * 50)
+    print(f"TOTAL POSTS IN DATABASE: {len(posts)}")
+    print(f"NEW POSTS FOUND THIS RUN: {len(found_urls)}")
+    print("=" * 50)
 
 
 if __name__ == "__main__":
