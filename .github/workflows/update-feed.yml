@@ -1,8 +1,7 @@
 name: Update Tumblr RSS Feed
 
 on:
-  schedule:
-    - cron: "0 */6 * * *"
+
 
   workflow_dispatch:
 
