@@ -65,38 +65,76 @@ def clean_text(text):
     return text.strip()
 
 
-def get_post_title(url, surrounding_text=""):
+def extract_post_links(soup):
     """
-    Try to create a useful title from text near the Tumblr post link.
+    Extract Tumblr post URLs using the same general approach
+    as the scraper that previously found the 115 posts.
     """
 
-    text = clean_text(surrounding_text)
+    found = set()
 
-    if text:
-        # Avoid extremely long blocks of Tumblr page text.
-        if len(text) > 200:
-            text = text[:197] + "..."
+    for tag in soup.find_all(href=True):
 
-        return text
+        href = tag.get("href", "")
 
-    # Fall back to Tumblr URL.
-    match = re.search(r"/([^/]+)/(\d+)", url)
+        if not href:
+            continue
 
-    if match:
-        blog = match.group(1)
-        post_id = match.group(2)
-        return f"Tumblr post by {blog} ({post_id})"
+        # Absolute Tumblr URL
+        if href.startswith("https://www.tumblr.com/"):
+            url = href
+
+        # Relative Tumblr URL
+        elif href.startswith("/"):
+            url = "https://www.tumblr.com" + href
+
+        else:
+            continue
+
+        # Tumblr post URLs
+        if "/post/" in url:
+            url = url.split("?")[0]
+            url = url.split("#")[0]
+
+            found.add(url)
+
+    return list(found)
+
+
+def get_title(link):
+    """
+    Try to get useful text associated with the post link.
+    """
+
+    # Text directly inside the link
+    text = clean_text(link.get_text(" ", strip=True))
+
+    if text and len(text) > 3:
+        return text[:200]
+
+    # Try nearby parent text
+    parent = link.parent
+
+    if parent:
+        text = clean_text(
+            parent.get_text(" ", strip=True)
+        )
+
+        if text and len(text) > 3:
+            return text[:200]
 
     return "Tumblr post"
 
 
 def search_tumblr(query):
-    encoded = quote(query)
+    url = (
+        "https://www.tumblr.com/search/"
+        + quote(query)
+    )
 
-    url = f"https://www.tumblr.com/search/{encoded}"
-
-    print(f"\nSearching: {query}")
-    print(url)
+    print()
+    print(f"Searching: {query}")
+    print(f"URL: {url}")
 
     try:
         response = requests.get(
@@ -108,61 +146,43 @@ def search_tumblr(query):
         print(f"HTTP status: {response.status_code}")
 
         if response.status_code != 200:
-            print("Search failed.")
+            print("Search request failed.")
             return []
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+        # Use the working post-link extraction method.
+        post_urls = extract_post_links(soup)
+
+        print(
+            f"Found {len(post_urls)} post URLs."
+        )
 
         results = []
 
-        # Look for Tumblr post links.
-        for link in soup.find_all("a", href=True):
+        # Locate the corresponding anchor so we can
+        # attempt to extract useful text.
+        for url in post_urls:
 
-            href = link.get("href", "")
+            link = soup.find(
+                "a",
+                href=lambda href:
+                    href and (
+                        href.split("?")[0].split("#")[0]
+                        == url
+                    )
+            )
 
-            if not href:
-                continue
-
-            # Convert relative URLs to absolute.
-            if href.startswith("/"):
-                full_url = "https://www.tumblr.com" + href
-            elif href.startswith("https://www.tumblr.com/"):
-                full_url = href
-            else:
-                continue
-
-            # Tumblr post URLs.
-            if "/post/" not in full_url:
-                continue
-
-            # Remove query strings/fragments.
-            full_url = full_url.split("?")[0].split("#")[0]
-
-            surrounding = ""
-
-            # Try to get useful nearby text.
-            parent = link.parent
-
-            if parent:
-                surrounding = parent.get_text(" ", strip=True)
-
-            title = get_post_title(full_url, surrounding)
+            title = get_title(link) if link else "Tumblr post"
 
             results.append({
-                "url": full_url,
+                "url": url,
                 "title": title,
                 "query": query,
             })
-
-        # Deduplicate results from this search.
-        unique = {}
-
-        for item in results:
-            unique[item["url"]] = item
-
-        results = list(unique.values())
-
-        print(f"Found {len(results)} posts.")
 
         return results
 
@@ -172,52 +192,55 @@ def search_tumblr(query):
 
 
 def merge_posts(existing, new_posts):
-    """
-    Merge new posts into the existing database without duplicates.
-    """
 
     posts_by_url = {}
 
-    # Existing posts first.
+    # Keep everything already saved.
     for post in existing:
+
         url = post.get("url")
 
         if url:
             posts_by_url[url] = post
 
-    # New posts overwrite metadata for the same URL.
+    # Add newly discovered posts.
     for post in new_posts:
+
         url = post.get("url")
 
         if not url:
             continue
 
         if url in posts_by_url:
-            old = posts_by_url[url]
 
-            # Keep a better existing title if the new one is generic.
-            old_title = old.get("title", "")
+            existing_post = posts_by_url[url]
+
+            # Update title only if we found
+            # something more useful.
             new_title = post.get("title", "")
+            old_title = existing_post.get("title", "")
 
-            if new_title and (
-                not old_title
-                or old_title.startswith("Tumblr post by ")
+            if (
+                new_title
+                and new_title != "Tumblr post"
+                and (
+                    not old_title
+                    or old_title == "Tumblr post"
+                )
             ):
-                old["title"] = new_title
-
-            # Keep track of the search term.
-            old["query"] = post.get(
-                "query",
-                old.get("query", "")
-            )
+                existing_post["title"] = new_title
 
         else:
-            post["added"] = datetime.now(timezone.utc).isoformat()
+
+            post["added"] = datetime.now(
+                timezone.utc
+            ).isoformat()
+
             posts_by_url[url] = post
 
     posts = list(posts_by_url.values())
 
-    # Newest additions first.
+    # Newest discovered posts first.
     posts.sort(
         key=lambda x: x.get("added", ""),
         reverse=True
@@ -226,39 +249,48 @@ def merge_posts(existing, new_posts):
     return posts[:MAX_POSTS]
 
 
-def xml_escape(text):
-    return html.escape(str(text), quote=True)
-
-
 def make_rss(posts):
-    os.makedirs(SITE_DIR, exist_ok=True)
+
+    os.makedirs(
+        SITE_DIR,
+        exist_ok=True
+    )
 
     rss = ET.Element(
         "rss",
         {
             "version": "2.0",
-            "xmlns:atom": "http://www.w3.org/2005/Atom"
+            "xmlns:atom":
+                "http://www.w3.org/2005/Atom"
         }
     )
 
-    channel = ET.SubElement(rss, "channel")
+    channel = ET.SubElement(
+        rss,
+        "channel"
+    )
 
     ET.SubElement(
         channel,
         "title"
-    ).text = "Johnny Knoxville x Reader Tumblr Feed"
+    ).text = (
+        "Johnny Knoxville x Reader Tumblr Feed"
+    )
 
     ET.SubElement(
         channel,
         "link"
-    ).text = "https://savsb.github.io/johnny-knoxville-rss/"
+    ).text = (
+        "https://savsb.github.io/"
+        "johnny-knoxville-rss/"
+    )
 
     ET.SubElement(
         channel,
         "description"
     ).text = (
-        "Tumblr posts related to Johnny Knoxville x Reader, "
-        "fanfiction, imagines and related searches."
+        "Tumblr posts related to Johnny Knoxville "
+        "x Reader, fanfiction, imagines and related searches."
     )
 
     ET.SubElement(
@@ -271,15 +303,13 @@ def make_rss(posts):
         "generator"
     ).text = "Custom Tumblr RSS Generator"
 
-    # Atom self link.
     ET.SubElement(
         channel,
         "{http://www.w3.org/2005/Atom}link",
         {
-            "href": (
+            "href":
                 "https://savsb.github.io/"
-                "johnny-knoxville-rss/feed.xml"
-            ),
+                "johnny-knoxville-rss/feed.xml",
             "rel": "self",
             "type": "application/rss+xml",
         }
@@ -287,48 +317,78 @@ def make_rss(posts):
 
     for post in posts:
 
-        item = ET.SubElement(channel, "item")
+        item = ET.SubElement(
+            channel,
+            "item"
+        )
 
-        title = post.get("title", "Tumblr post")
-        url = post.get("url", "")
+        title = post.get(
+            "title",
+            "Tumblr post"
+        )
 
-        ET.SubElement(item, "title").text = title
-        ET.SubElement(item, "link").text = url
-        ET.SubElement(item, "guid").text = url
-
-        description = (
-            f"Found through Tumblr search: "
-            f"{post.get('query', 'Johnny Knoxville')}"
+        url = post.get(
+            "url",
+            ""
         )
 
         ET.SubElement(
             item,
+            "title"
+        ).text = title
+
+        ET.SubElement(
+            item,
+            "link"
+        ).text = url
+
+        ET.SubElement(
+            item,
+            "guid"
+        ).text = url
+
+        ET.SubElement(
+            item,
             "description"
-        ).text = description
+        ).text = (
+            "Tumblr search: "
+            + post.get(
+                "query",
+                "Johnny Knoxville"
+            )
+        )
 
         added = post.get("added")
 
         if added:
+
             try:
+
                 dt = datetime.fromisoformat(
-                    added.replace("Z", "+00:00")
+                    added.replace(
+                        "Z",
+                        "+00:00"
+                    )
                 )
 
-                timestamp = dt.strftime(
+                pubdate = dt.strftime(
                     "%a, %d %b %Y %H:%M:%S +0000"
                 )
 
                 ET.SubElement(
                     item,
                     "pubDate"
-                ).text = timestamp
+                ).text = pubdate
 
             except Exception:
                 pass
 
     tree = ET.ElementTree(rss)
 
-    ET.indent(tree, space="  ")
+    ET.indent(
+        tree,
+        space="  "
+    )
 
     tree.write(
         FEED_FILE,
@@ -336,45 +396,62 @@ def make_rss(posts):
         xml_declaration=True
     )
 
-    print(f"\nRSS feed written to {FEED_FILE}")
+    print(
+        f"RSS feed created with "
+        f"{len(posts)} posts."
+    )
 
 
 def make_index(posts):
-    os.makedirs(SITE_DIR, exist_ok=True)
+
+    os.makedirs(
+        SITE_DIR,
+        exist_ok=True
+    )
 
     rows = []
 
     for post in posts:
 
         title = html.escape(
-            post.get("title", "Tumblr post")
+            post.get(
+                "title",
+                "Tumblr post"
+            )
         )
 
         url = html.escape(
-            post.get("url", ""),
+            post.get(
+                "url",
+                ""
+            ),
             quote=True
         )
 
         query = html.escape(
-            post.get("query", "")
+            post.get(
+                "query",
+                ""
+            )
         )
 
         rows.append(
             f"""
-            <li>
-                <a href="{url}" target="_blank">
-                    {title}
-                </a>
-                <small> — {query}</small>
-            </li>
-            """
+<li>
+<a href="{url}" target="_blank">
+{title}
+</a>
+<small> — {query}</small>
+</li>
+"""
         )
 
     page = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport"
+content="width=device-width, initial-scale=1.0">
 <title>Johnny Knoxville Tumblr RSS Feed</title>
 </head>
 
@@ -383,7 +460,7 @@ def make_index(posts):
 <h1>Johnny Knoxville Tumblr RSS Feed</h1>
 
 <p>
-This page is automatically generated from Tumblr searches.
+Automatically collected Tumblr search results.
 </p>
 
 <p>
@@ -391,7 +468,8 @@ This page is automatically generated from Tumblr searches.
 </p>
 
 <p>
-Posts currently stored: {len(posts)}
+Posts currently stored:
+<strong>{len(posts)}</strong>
 </p>
 
 <ul>
@@ -402,38 +480,84 @@ Posts currently stored: {len(posts)}
 </html>
 """
 
-    with open(INDEX_FILE, "w", encoding="utf-8") as f:
+    with open(
+        INDEX_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
         f.write(page)
-
-    print(f"Index written to {INDEX_FILE}")
 
 
 def main():
 
-    print("===== JOHNNY KNOXVILLE TUMBLR RSS =====")
+    print(
+        "===== JOHNNY KNOXVILLE "
+        "TUMBLR RSS ====="
+    )
 
     existing = load_posts()
 
-    print(f"Existing posts: {len(existing)}")
+    print(
+        f"Existing posts: "
+        f"{len(existing)}"
+    )
 
     all_new = []
 
     for query in QUERIES:
+
         results = search_tumblr(query)
+
         all_new.extend(results)
 
-    print(f"\nTotal newly discovered results: {len(all_new)}")
+    total_found = len(all_new)
 
-    posts = merge_posts(existing, all_new)
+    print()
+    print(
+        f"Total newly discovered results: "
+        f"{total_found}"
+    )
 
-    print(f"Total stored posts: {len(posts)}")
+    # SAFETY CHECK:
+    #
+    # If Tumblr gives us zero results,
+    # DO NOT destroy the existing database.
+    if total_found == 0:
 
-    save_posts(posts)
+        print()
+        print(
+            "WARNING: Tumblr returned "
+            "zero results."
+        )
+
+        print(
+            "Keeping existing posts.json "
+            "unchanged."
+        )
+
+        posts = existing
+
+    else:
+
+        posts = merge_posts(
+            existing,
+            all_new
+        )
+
+        save_posts(posts)
+
+    print(
+        f"Total stored posts: "
+        f"{len(posts)}"
+    )
 
     make_rss(posts)
     make_index(posts)
 
-    print("\n===== COMPLETE =====")
+    print()
+    print(
+        "===== COMPLETE ====="
+    )
 
 
 if __name__ == "__main__":
