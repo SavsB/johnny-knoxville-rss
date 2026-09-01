@@ -3,9 +3,15 @@ import re
 import json
 import html
 import requests
+import warnings
 
-from bs4 import BeautifulSoup
-from datetime import datetime, timezone, date
+warnings.filterwarnings(
+    "ignore",
+    category=MarkupResemblesLocatorWarning
+)
+
+from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
+from datetime import datetime, timezone, date, timedelta
 from urllib.parse import quote
 from xml.etree import ElementTree as ET
 
@@ -576,8 +582,8 @@ def search_date_range(
         date_query
     )
 
-    # Fewer than 15 means we did not hit the
-    # apparent Tumblr web result ceiling.
+    # Fewer than 15 results means we did not
+    # hit Tumblr's apparent web-search limit.
     if len(results) < TUMBLR_RESULT_LIMIT:
         return results
 
@@ -588,7 +594,7 @@ def search_date_range(
         )
         return results
 
-    # Cannot split a one-day range any further.
+    # A one-day range cannot be split any further.
     days = (end_date - start_date).days
 
     if days <= 1:
@@ -602,13 +608,12 @@ def search_date_range(
 
         return results
 
-    midpoint = start_date + (
-        end_date - start_date
-    ) / 2
+    # Calculate the midpoint using timedelta.
+    midpoint = start_date + timedelta(
+        days=days // 2
+    )
 
-    midpoint = midpoint.date()
-
-    # Safety against accidental zero-length ranges.
+    # Safety check.
     if midpoint <= start_date:
         return results
 
@@ -648,7 +653,10 @@ def search_date_range(
 
     for post in first_half + second_half:
 
-        url = post.get("url", "")
+        url = post.get(
+            "url",
+            ""
+        ).strip()
 
         if not url:
             continue
@@ -659,6 +667,11 @@ def search_date_range(
         seen_urls.add(url)
 
         combined.append(post)
+
+    print(
+        f"Combined split results: "
+        f"{len(combined)}"
+    )
 
     return combined
 
