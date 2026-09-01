@@ -1,5 +1,4 @@
 import json
-import os
 import re
 from collections import Counter
 from datetime import datetime, timezone
@@ -8,531 +7,864 @@ from urllib.parse import urlparse
 
 POSTS_FILE = "posts.json"
 
+# How many examples to show from each category
+EXAMPLES_PER_CATEGORY = 15
 
-def load_posts():
-    if not os.path.exists(POSTS_FILE):
-        print(f"ERROR: {POSTS_FILE} was not found.")
-        raise SystemExit(1)
 
-    with open(POSTS_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
+# ---------------------------------------------------------------------
+# BASIC HELPERS
+# ---------------------------------------------------------------------
 
-    if isinstance(data, list):
-        return data
+def clean_text(value):
+    if value is None:
+        return ""
 
-    if isinstance(data, dict):
-        # Handle common possible structures.
-        for key in ("posts", "items", "results", "data"):
-            if isinstance(data.get(key), list):
-                return data[key]
+    if isinstance(value, list):
+        return " ".join(clean_text(x) for x in value)
 
-    print("ERROR: Could not find a list of posts in posts.json.")
-    raise SystemExit(1)
+    if isinstance(value, dict):
+        return " ".join(clean_text(v) for v in value.values())
+
+    return str(value)
+
+
+def normalize(text):
+    text = clean_text(text).lower()
+
+    # Normalize common separators
+    text = text.replace("_", " ")
+    text = text.replace("-", " ")
+    text = text.replace("–", " ")
+    text = text.replace("—", " ")
+
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
+
+
+def get_content(post):
+    """
+    Return the actual searchable content of a post.
+
+    Query metadata is deliberately NOT included here when deciding
+    whether a post itself is relevant. A query such as
+    '"johnny knoxville" reader' cannot prove that the post itself
+    is about Johnny Knoxville.
+    """
+
+    title = clean_text(post.get("title"))
+    excerpt = clean_text(post.get("excerpt"))
+    description = clean_text(post.get("description"))
+    tags = clean_text(post.get("tags"))
+
+    return normalize(
+        " ".join([
+            title,
+            excerpt,
+            description,
+            tags,
+        ])
+    )
+
+
+def get_all_metadata(post):
+    """
+    Everything available, including search metadata.
+    Useful for diagnostics.
+    """
+
+    values = []
+
+    for key in [
+        "title",
+        "excerpt",
+        "description",
+        "tags",
+        "blog",
+        "query",
+    ]:
+        values.append(clean_text(post.get(key)))
+
+    return normalize(" ".join(values))
 
 
 def get_url(post):
-    for key in ("url", "postUrl", "link"):
-        value = post.get(key)
-        if value:
-            return str(value)
+    return clean_text(post.get("url") or post.get("link"))
 
-    return ""
-
-
-def get_text(post):
-    parts = []
-
-    for key in (
-        "title",
-        "summary",
-        "description",
-        "excerpt",
-        "text",
-        "body",
-        "content",
-        "caption",
-    ):
-        value = post.get(key)
-
-        if isinstance(value, str):
-            parts.append(value)
-
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, str):
-                    parts.append(item)
-                elif isinstance(item, dict):
-                    for subkey in ("text", "content", "value"):
-                        subvalue = item.get(subkey)
-                        if isinstance(subvalue, str):
-                            parts.append(subvalue)
-
-    return " ".join(parts)
-
-
-def get_title(post):
-    for key in ("title", "name"):
-        value = post.get(key)
-
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    return ""
-
-
-def get_date(post):
-    for key in (
-        "date",
-        "published",
-        "published_at",
-        "timestamp",
-        "datePublished",
-        "postDate",
-    ):
-        value = post.get(key)
-
-        if value is None:
-            continue
-
-        # Unix timestamp
-        if isinstance(value, (int, float)):
-            try:
-                return datetime.fromtimestamp(value, tz=timezone.utc)
-            except Exception:
-                pass
-
-        if isinstance(value, str):
-            value = value.strip()
-
-            # ISO date/time
-            try:
-                cleaned = value.replace("Z", "+00:00")
-                dt = datetime.fromisoformat(cleaned)
-
-                # Normalize naive datetimes to UTC.
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-
-                # Normalize timezone-aware datetimes to UTC.
-                return dt.astimezone(timezone.utc)
-
-            except Exception:
-                pass
-
-            # Common Tumblr date formats
-            for fmt in (
-                "%Y-%m-%d",
-                "%Y-%m-%d %H:%M:%S",
-                "%Y-%m-%dT%H:%M:%S",
-                "%Y-%m-%dT%H:%M:%S.%f",
-            ):
-                try:
-                    dt = datetime.strptime(value, fmt)
-                    return dt.replace(tzinfo=timezone.utc)
-                except Exception:
-                    pass
-
-    return None
 
 def get_blog(post):
-    for key in (
-        "blog",
-        "blogName",
-        "blog_name",
-        "username",
-        "author",
-        "source",
-    ):
-        value = post.get(key)
+    blog = clean_text(post.get("blog"))
 
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-        if isinstance(value, dict):
-            for subkey in ("name", "title", "username", "url"):
-                subvalue = value.get(subkey)
-                if isinstance(subvalue, str) and subvalue.strip():
-                    return subvalue.strip()
+    if blog:
+        return blog
 
     url = get_url(post)
 
     if url:
         try:
-            hostname = urlparse(url).hostname
-            if hostname:
-                hostname = hostname.lower()
+            host = urlparse(url).netloc.lower()
 
-                if hostname.endswith(".tumblr.com"):
-                    return hostname.split(".")[0]
+            if host.startswith("www."):
+                host = host[4:]
+
+            if host.endswith(".tumblr.com"):
+                return host[:-10]
+
+            return host
         except Exception:
             pass
 
     return ""
 
 
-def normalize_url(url):
-    url = url.strip()
+def parse_date(post):
+    value = (
+        post.get("timestamp")
+        or post.get("published")
+        or post.get("date")
+        or post.get("added")
+    )
 
-    # Remove trailing slash.
-    url = url.rstrip("/")
+    if not value:
+        return None
 
-    return url.lower()
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+        except Exception:
+            return None
+
+    value = str(value).strip()
+
+    if not value:
+        return None
+
+    # ISO timestamps ending in Z
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+
+    try:
+        dt = datetime.fromisoformat(value)
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt.astimezone(timezone.utc)
+
+    except Exception:
+        pass
+
+    # Common fallback formats
+    formats = [
+        "%Y-%m-%d",
+        "%Y-%m-%d %H:%M:%S",
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+    return None
 
 
-def classify_post(post):
+# ---------------------------------------------------------------------
+# JOHNNY / JACKASS DETECTION
+# ---------------------------------------------------------------------
+
+EXCLUDED_JOHNNYS = [
+    "johnny joestar",
+    "johnny storm",
+    "johnny silverhand",
+    "johnny tightlips",
+    "johnny bravo",
+    "johnny cage",
+    "johnny test",
+    "johnny sins",
+    "johnny lawrence",
+    "johnny blaze",
+    "johnny english",
+    "johnny depp",
+    "johnny cash",
+    "johnny mnemonics",
+    "johnny rico",
+]
+
+
+READER_PATTERNS = [
+    r"\bx\s*reader\b",
+    r"\bx!reader\b",
+    r"\bfem!reader\b",
+    r"\bgn!reader\b",
+    r"\bmale!reader\b",
+    r"\breader\b",
+    r"\by/n\b",
+    r"\by\\?n\b",
+    r"\byour\b",
+    r"\breader insert\b",
+    r"\bself insert\b",
+]
+
+
+OC_PATTERNS = [
+    r"\bx\s*oc\b",
+    r"\bx!oc\b",
+    r"\boc\b",
+    r"\boriginal character\b",
+    r"\boriginal female character\b",
+    r"\boriginal male character\b",
+]
+
+
+FIC_PATTERNS = [
+    r"\bfic\b",
+    r"\bfics\b",
+    r"\bfanfic\b",
+    r"\bfanfiction\b",
+    r"\bone shot\b",
+    r"\boneshot\b",
+    r"\bdrabble\b",
+    r"\bchapter\b",
+    r"\bmasterpost\b",
+    r"\bmasterlist\b",
+    r"\bimagine\b",
+    r"\bheadcanon\b",
+    r"\bheadcanons\b",
+    r"\bwriting\b",
+    r"\bstory\b",
+    r"\bpart \d+\b",
+]
+
+
+JACKASS_PATTERNS = [
+    r"\bjackass\b",
+    r"\bjackass crew\b",
+    r"\bjackass cast\b",
+    r"\bjackass guys\b",
+]
+
+
+SEARCH_RESULT_PATTERNS = [
+    r"\btumblr search result\b",
+    r"\bsearch result\b",
+    r"\bsearch results\b",
+    r"\btumblr search\b",
+]
+
+
+def contains_any_pattern(text, patterns):
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def has_reader(text):
+    return contains_any_pattern(text, READER_PATTERNS)
+
+
+def has_oc(text):
+    return contains_any_pattern(text, OC_PATTERNS)
+
+
+def has_fic_indicator(text):
+    return contains_any_pattern(text, FIC_PATTERNS)
+
+
+def has_jackass(text):
+    return contains_any_pattern(text, JACKASS_PATTERNS)
+
+
+def is_excluded_johnny(text):
+    return any(name in text for name in EXCLUDED_JOHNNYS)
+
+
+def has_johnny_knoxville(text):
     """
-    Very rough relevance classification.
+    Strongest identification.
 
-    This is intentionally conservative:
-    - Strongly relevant:
-      Johnny + reader/x reader
-      Johnny + fic/fanfiction/imagine/oneshot/etc.
-    - Possibly relevant:
-      Johnny/Jackass + story/writing/etc.
-    - Weak/uncertain:
-      only Johnny or only Jackass
-    - Unlikely:
-      neither.
+    We require either:
+      - johnny knoxville
+      - johnny-knoxville
+      - johnny_knoxville
+      - Knoxville with Johnny nearby
     """
 
-    text = get_text(post).lower()
+    if "johnny knoxville" in text:
+        return True
 
-    # Normalize punctuation.
-    normalized = re.sub(r"[^a-z0-9+#]+", " ", text)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if "johnnyknoxville" in text:
+        return True
 
-    johnny_terms = [
-        "johnny knoxville",
-        "johnny",
-    ]
+    # Allow punctuation/separators between Johnny and Knoxville
+    if re.search(r"\bjohnny[\s_\-–—]+knoxville\b", text):
+        return True
 
-    jackass_terms = [
-        "jackass",
-    ]
-
-    reader_terms = [
-        "x reader",
-        "xreader",
-        "reader insert",
-        "reader",
-        "y/n",
-        "your name",
-    ]
-
-    fic_terms = [
-        "fanfiction",
-        "fan fiction",
-        "fic",
-        "imagine",
-        "oneshot",
-        "one shot",
-        "one-shot",
-        "story",
-        "writing",
-        "chapter",
-        "smut",
-        "fluff",
-        "headcanon",
-        "headcanons",
-    ]
-
-    has_johnny = any(term in normalized for term in johnny_terms)
-    has_jackass = any(term in normalized for term in jackass_terms)
-    has_reader = any(term in normalized for term in reader_terms)
-    has_fic = any(term in normalized for term in fic_terms)
-
-    has_subject = has_johnny or has_jackass
-
-    if has_johnny and has_reader:
-        return "STRONG: Johnny + Reader"
-
-    if has_johnny and has_fic:
-        return "STRONG: Johnny + Fic"
-
-    if has_jackass and has_reader:
-        return "POSSIBLE: Jackass + Reader"
-
-    if has_jackass and has_fic:
-        return "POSSIBLE: Jackass + Fic"
-
-    if has_subject and (has_reader or has_fic):
-        return "POSSIBLE"
-
-    if has_subject:
-        return "WEAK: Subject only"
-
-    return "UNLIKELY"
+    # "Knoxville" by itself is also a useful identifier,
+    # but we treat it slightly differently elsewhere.
+    return False
 
 
-def print_section(title):
+def has_knoxville(text):
+    return bool(re.search(r"\bknoxville\b", text))
+
+
+def has_standalone_johnny(text):
+    """
+    Detect Johnny without assuming which Johnny.
+    """
+
+    return bool(re.search(r"\bjohnny\b", text))
+
+
+# ---------------------------------------------------------------------
+# SEARCH-RESULT / GARBAGE DETECTION
+# ---------------------------------------------------------------------
+
+def is_search_result_page(post, content):
+    title = normalize(post.get("title"))
+    excerpt = normalize(post.get("excerpt"))
+    description = normalize(post.get("description"))
+
+    combined = " ".join([
+        title,
+        excerpt,
+        description,
+    ])
+
+    # Extremely obvious Tumblr search-result pages
+    if contains_any_pattern(combined, SEARCH_RESULT_PATTERNS):
+        return True
+
+    # Very common structure produced by Tumblr search-result posts
+    if (
+        "tumblr search result" in combined
+        and "johnny knoxville" in combined
+    ):
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------
+# CLASSIFICATION
+# ---------------------------------------------------------------------
+
+CATEGORIES = [
+    "JOHNNY KNOXVILLE + READER/OC",
+    "JOHNNY KNOXVILLE FIC / IMAGINE",
+    "JOHNNY KNOXVILLE - NON-FIC / OTHER",
+    "JACKASS + READER/OC - JOHNNY UNCLEAR",
+    "JACKASS FIC - JOHNNY UNCLEAR",
+    "EXCLUDED / WRONG JOHNNY",
+    "SEARCH RESULT / LOW-VALUE PAGE",
+    "UNCERTAIN",
+]
+
+
+def classify(post):
+    content = get_content(post)
+
+    title = normalize(post.get("title"))
+    excerpt = normalize(post.get("excerpt"))
+    description = normalize(post.get("description"))
+    tags = normalize(post.get("tags"))
+
+    content_fields = " ".join([
+        title,
+        excerpt,
+        description,
+        tags,
+    ])
+
+    # -------------------------------------------------------------
+    # 1. Search-result garbage gets removed first.
+    # -------------------------------------------------------------
+
+    if is_search_result_page(post, content_fields):
+        return "SEARCH RESULT / LOW-VALUE PAGE"
+
+    # -------------------------------------------------------------
+    # 2. Explicitly wrong Johnnys.
+    # -------------------------------------------------------------
+
+    if is_excluded_johnny(content_fields):
+        return "EXCLUDED / WRONG JOHNNY"
+
+    # -------------------------------------------------------------
+    # 3. Strong Johnny Knoxville identification.
+    # -------------------------------------------------------------
+
+    knoxville = has_johnny_knoxville(content)
+
+    # "Knoxville" without Johnny can still be useful.
+    if not knoxville and has_knoxville(content):
+        knoxville = True
+
+    # -------------------------------------------------------------
+    # 4. Johnny Knoxville + Reader / OC
+    # -------------------------------------------------------------
+
+    if knoxville and (has_reader(content) or has_oc(content)):
+        return "JOHNNY KNOXVILLE + READER/OC"
+
+    # -------------------------------------------------------------
+    # 5. Johnny Knoxville fanfiction / imagines.
+    # -------------------------------------------------------------
+
+    if knoxville and has_fic_indicator(content):
+        return "JOHNNY KNOXVILLE FIC / IMAGINE"
+
+    # -------------------------------------------------------------
+    # 6. Johnny Knoxville but no obvious fic indicator.
+    # -------------------------------------------------------------
+
+    if knoxville:
+        return "JOHNNY KNOXVILLE - NON-FIC / OTHER"
+
+    # -------------------------------------------------------------
+    # 7. Jackass + Reader/OC where Johnny isn't established.
+    # -------------------------------------------------------------
+
+    if has_jackass(content) and (has_reader(content) or has_oc(content)):
+        return "JACKASS + READER/OC - JOHNNY UNCLEAR"
+
+    # -------------------------------------------------------------
+    # 8. Jackass fic without clear Johnny.
+    # -------------------------------------------------------------
+
+    if has_jackass(content) and has_fic_indicator(content):
+        return "JACKASS FIC - JOHNNY UNCLEAR"
+
+    # -------------------------------------------------------------
+    # 9. Anything containing standalone Johnny but not Knoxville.
+    # -------------------------------------------------------------
+
+    if has_standalone_johnny(content):
+        return "UNCERTAIN"
+
+    # -------------------------------------------------------------
+    # 10. Everything else.
+    # -------------------------------------------------------------
+
+    return "UNCERTAIN"
+
+
+# ---------------------------------------------------------------------
+# DISPLAY HELPERS
+# ---------------------------------------------------------------------
+
+def print_header(title):
     print()
     print("=" * 70)
     print(title)
     print("=" * 70)
 
 
-def main():
-    posts = load_posts()
+def print_post(post):
+    url = get_url(post)
+    title = clean_text(post.get("title")) or "(no title)"
+    blog = get_blog(post)
 
-    print_section("BASIC DATASET INFORMATION")
+    print(f"URL:   {url}")
+    print(f"Blog:  {blog}")
+    print(f"Title: {title}")
+
+    excerpt = clean_text(post.get("excerpt"))
+    if excerpt:
+        excerpt = excerpt.replace("\n", " ")
+        if len(excerpt) > 500:
+            excerpt = excerpt[:500] + "..."
+        print(f"Text:  {excerpt}")
+
+    query = clean_text(post.get("query"))
+    if query:
+        print(f"Query: {query}")
+
+    print("-" * 50)
+
+
+# ---------------------------------------------------------------------
+# MAIN AUDIT
+# ---------------------------------------------------------------------
+
+def main():
+
+    print("=" * 70)
+    print("JOHNNY KNOXVILLE TUMBLR DATABASE AUDIT")
+    print("=" * 70)
+
+    # -------------------------------------------------------------
+    # Load database
+    # -------------------------------------------------------------
+
+    try:
+        with open(POSTS_FILE, "r", encoding="utf-8") as f:
+            posts = json.load(f)
+    except FileNotFoundError:
+        print(f"ERROR: Could not find {POSTS_FILE}")
+        return
+
+    if not isinstance(posts, list):
+        print("ERROR: posts.json does not contain a list.")
+        return
+
+    # -------------------------------------------------------------
+    # Basic statistics
+    # -------------------------------------------------------------
+
+    urls = []
+
+    for post in posts:
+        url = get_url(post)
+
+        if url:
+            urls.append(url)
+
+    unique_urls = set(urls)
+
+    print_header("BASIC DATASET INFORMATION")
 
     print(f"Total records in posts.json: {len(posts)}")
-
-    # URLs
-    urls = [get_url(post) for post in posts]
-    nonempty_urls = [url for url in urls if url]
-
-    normalized_urls = [normalize_url(url) for url in nonempty_urls]
-
-    unique_urls = set(normalized_urls)
-
-    print(f"Records with a URL:           {len(nonempty_urls)}")
+    print(f"Records with a URL:           {len(urls)}")
     print(f"Unique URLs:                  {len(unique_urls)}")
-    print(f"Duplicate URL records:       {len(nonempty_urls) - len(unique_urls)}")
-    print(f"Records without a URL:       {len(posts) - len(nonempty_urls)}")
+    print(f"Duplicate URL records:       {len(urls) - len(unique_urls)}")
+    print(f"Records without a URL:       {len(posts) - len(urls)}")
 
-    # Duplicate URLs
-    duplicate_counter = Counter(normalized_urls)
-
-    duplicates = [
-        (url, count)
-        for url, count in duplicate_counter.items()
+    duplicate_urls = [
+        url
+        for url, count in Counter(urls).items()
         if count > 1
     ]
 
-    if duplicates:
+    if duplicate_urls:
         print()
-        print("Duplicate URLs:")
-        for url, count in sorted(
-            duplicates,
-            key=lambda x: (-x[1], x[0])
-        )[:25]:
-            print(f"  {count}x  {url}")
-    else:
-        print("\nNo duplicate URLs found.")
+        print("DUPLICATE URLS:")
 
-    # Dates
-    print_section("DATE COVERAGE")
+        counts = Counter(urls)
+
+        for url in duplicate_urls:
+            print(f"  {counts[url]}x {url}")
+    else:
+        print()
+        print("No duplicate URLs found.")
+
+    # -------------------------------------------------------------
+    # Date coverage
+    # -------------------------------------------------------------
 
     dated_posts = []
 
     for post in posts:
-        dt = get_date(post)
+        dt = parse_date(post)
 
         if dt:
             dated_posts.append((dt, post))
+
+    dated_posts.sort(key=lambda x: x[0])
+
+    print_header("DATE COVERAGE")
 
     print(f"Posts with recognized dates: {len(dated_posts)}")
     print(f"Posts without recognized dates: {len(posts) - len(dated_posts)}")
 
     if dated_posts:
-        dated_posts.sort(key=lambda x: x[0])
-
         oldest_dt, oldest_post = dated_posts[0]
         newest_dt, newest_post = dated_posts[-1]
 
         print()
         print(f"Oldest post: {oldest_dt}")
-        print(f"  URL: {get_url(oldest_post)}")
-
-        title = get_title(oldest_post)
-        if title:
-            print(f"  Title: {title}")
+        print(f"  URL:   {get_url(oldest_post)}")
+        print(f"  Title: {clean_text(oldest_post.get('title'))}")
 
         print()
         print(f"Newest post: {newest_dt}")
-        print(f"  URL: {get_url(newest_post)}")
+        print(f"  URL:   {get_url(newest_post)}")
+        print(f"  Title: {clean_text(newest_post.get('title'))}")
 
-        title = get_title(newest_post)
-        if title:
-            print(f"  Title: {title}")
+    # -------------------------------------------------------------
+    # By year
+    # -------------------------------------------------------------
 
-    # Year/month distribution
-    print_section("POSTS BY YEAR")
+    year_counts = Counter()
 
-    year_counter = Counter()
+    for dt, post in dated_posts:
+        year_counts[dt.year] += 1
 
-    for dt, _ in dated_posts:
-        year_counter[dt.year] += 1
+    print_header("POSTS BY YEAR")
 
-    if year_counter:
-        for year, count in sorted(year_counter.items()):
-            print(f"{year}: {count}")
+    for year in sorted(year_counts):
+        print(f"{year}: {year_counts[year]}")
 
-    print_section("POSTS BY MONTH")
+    # -------------------------------------------------------------
+    # By month
+    # -------------------------------------------------------------
 
-    month_counter = Counter()
+    month_counts = Counter()
 
-    for dt, _ in dated_posts:
-        month_counter[dt.strftime("%Y-%m")] += 1
+    for dt, post in dated_posts:
+        month_counts[dt.strftime("%Y-%m")] += 1
 
-    if month_counter:
-        for month, count in sorted(month_counter.items()):
-            print(f"{month}: {count}")
+    print_header("POSTS BY MONTH")
 
-    # Blogs
-    print_section("BLOG / SOURCE DISTRIBUTION")
+    for month in sorted(month_counts):
+        print(f"{month}: {month_counts[month]}")
 
-    blogs = []
+    # -------------------------------------------------------------
+    # Blog distribution
+    # -------------------------------------------------------------
+
+    blog_counts = Counter()
 
     for post in posts:
         blog = get_blog(post)
 
         if blog:
-            blogs.append(blog.lower())
+            blog_counts[blog] += 1
 
-    blog_counter = Counter(blogs)
+    print_header("BLOG / SOURCE DISTRIBUTION")
 
-    print(f"Posts with identifiable blog/source: {len(blogs)}")
-    print(f"Unique blogs/sources: {len(blog_counter)}")
+    print(f"Posts with identifiable blog/source: {sum(blog_counts.values())}")
+    print(f"Unique blogs/sources: {len(blog_counts)}")
 
-    if blog_counter:
-        print()
-        print("Top 30 blogs/sources:")
+    print()
+    print("Top 30 blogs/sources:")
 
-        for blog, count in blog_counter.most_common(30):
-            print(f"{count:4}  {blog}")
+    for blog, count in blog_counts.most_common(30):
+        print(f"{count:4}  {blog}")
 
-    # Relevance
-    print_section("ROUGH RELEVANCE ANALYSIS")
+    # -------------------------------------------------------------
+    # Classification
+    # -------------------------------------------------------------
 
-    classifications = []
+    categorized = {}
+
+    for category in CATEGORIES:
+        categorized[category] = []
 
     for post in posts:
-        classification = classify_post(post)
-        classifications.append(classification)
+        category = classify(post)
+        categorized[category].append(post)
 
-    class_counter = Counter(classifications)
+    print_header("PRECISE RELEVANCE ANALYSIS")
 
-    for category, count in class_counter.most_common():
-        print(f"{count:4}  {category}")
+    for category in CATEGORIES:
+        print(f"{len(categorized[category]):4}  {category}")
 
-    # Show examples
-    for category in (
-        "STRONG: Johnny + Reader",
-        "STRONG: Johnny + Fic",
-        "POSSIBLE: Jackass + Reader",
-        "POSSIBLE: Jackass + Fic",
-        "POSSIBLE",
-        "WEAK: Subject only",
-        "UNLIKELY",
-    ):
-        examples = [
-            post
-            for post in posts
-            if classify_post(post) == category
-        ]
+    # -------------------------------------------------------------
+    # Percentage summary
+    # -------------------------------------------------------------
 
-        if not examples:
+    print_header("PERCENTAGE SUMMARY")
+
+    total = len(posts)
+
+    for category in CATEGORIES:
+        count = len(categorized[category])
+
+        if total:
+            percentage = (count / total) * 100
+        else:
+            percentage = 0
+
+        print(f"{count:4}  {percentage:6.2f}%  {category}")
+
+    # -------------------------------------------------------------
+    # Important category
+    # -------------------------------------------------------------
+
+    print_header("LIKELY MAIN FEED CONTENT")
+
+    main_feed_count = len(
+        categorized["JOHNNY KNOXVILLE + READER/OC"]
+    )
+
+    print(
+        f"Likely Johnny Knoxville + Reader/OC posts: "
+        f"{main_feed_count}"
+    )
+
+    print()
+    print("These are the strongest candidates for your main RSS feed.")
+
+    # -------------------------------------------------------------
+    # Examples
+    # -------------------------------------------------------------
+
+    example_categories = [
+        "JOHNNY KNOXVILLE + READER/OC",
+        "JOHNNY KNOXVILLE FIC / IMAGINE",
+        "JOHNNY KNOXVILLE - NON-FIC / OTHER",
+        "JACKASS + READER/OC - JOHNNY UNCLEAR",
+        "EXCLUDED / WRONG JOHNNY",
+        "SEARCH RESULT / LOW-VALUE PAGE",
+        "UNCERTAIN",
+    ]
+
+    for category in example_categories:
+
+        posts_in_category = categorized[category]
+
+        if not posts_in_category:
             continue
 
-        print_section(f"EXAMPLES — {category}")
+        print_header(
+            f"EXAMPLES — {category}"
+        )
 
-        for post in examples[:10]:
-            print(f"URL: {get_url(post)}")
+        for post in posts_in_category[:EXAMPLES_PER_CATEGORY]:
+            print_post(post)
 
-            title = get_title(post)
-            if title:
-                print(f"Title: {title}")
+    # -------------------------------------------------------------
+    # Suspicious posts: Johnny appears, but Knoxville does not
+    # -------------------------------------------------------------
 
-            text = get_text(post)
-            text = re.sub(r"\s+", " ", text).strip()
-
-            if len(text) > 300:
-                text = text[:300] + "..."
-
-            if text:
-                print(f"Text: {text}")
-
-            print("-" * 50)
-
-    # Search/query metadata if present
-    print_section("STORED SEARCH / QUERY METADATA")
-
-    metadata_keys = Counter()
+    suspicious = []
 
     for post in posts:
-        for key in post.keys():
-            key_lower = key.lower()
+        content = get_content(post)
 
-            if any(
-                word in key_lower
-                for word in ("query", "search", "source", "keyword")
-            ):
-                metadata_keys[key] += 1
+        if (
+            has_standalone_johnny(content)
+            and not has_johnny_knoxville(content)
+            and not has_knoxville(content)
+            and not is_excluded_johnny(content)
+        ):
+            suspicious.append(post)
 
-    if metadata_keys:
-        print("Possible search-related fields:")
-        for key, count in metadata_keys.most_common():
-            print(f"{key}: present in {count} records")
+    print_header("SUSPICIOUS: 'JOHNNY' WITHOUT 'KNOXVILLE'")
 
-        print()
-        print("Example values:")
+    print(
+        f"Posts containing standalone 'Johnny' without "
+        f"an explicit Knoxville reference: {len(suspicious)}"
+    )
 
-        shown = 0
+    for post in suspicious[:EXAMPLES_PER_CATEGORY]:
+        print_post(post)
 
-        for post in posts:
-            for key in metadata_keys:
-                if key in post:
-                    print(f"{key}: {post[key]}")
-                    shown += 1
+    # -------------------------------------------------------------
+    # Search metadata analysis
+    # -------------------------------------------------------------
 
-                    if shown >= 20:
-                        break
+    query_counts = Counter()
 
-            if shown >= 20:
-                break
+    for post in posts:
+        query = clean_text(post.get("query"))
+
+        if query:
+            query_counts[query] += 1
+
+    print_header("SEARCH / QUERY METADATA")
+
+    print(f"Records containing query metadata: {sum(query_counts.values())}")
+
+    print()
+    print("Most common stored queries:")
+
+    for query, count in query_counts.most_common(30):
+        print(f"{count:4}  {query}")
+
+    # -------------------------------------------------------------
+    # Field coverage
+    # -------------------------------------------------------------
+
+    fields = [
+        "link",
+        "title",
+        "url",
+        "excerpt",
+        "query",
+        "timestamp",
+        "blog",
+        "added",
+        "tags",
+        "published",
+        "description",
+    ]
+
+    print_header("POST DATA STRUCTURE")
+
+    for field in fields:
+        count = sum(
+            1
+            for post in posts
+            if post.get(field) not in (None, "", [], {})
+        )
+
+        print(
+            f"{field:12}: {count}/{len(posts)}"
+        )
+
+    # -------------------------------------------------------------
+    # Final recommendation
+    # -------------------------------------------------------------
+
+    print_header("RECOMMENDATION")
+
+    strong = len(categorized["JOHNNY KNOXVILLE + READER/OC"])
+    fic = len(categorized["JOHNNY KNOXVILLE FIC / IMAGINE"])
+    other = len(categorized["JOHNNY KNOXVILLE - NON-FIC / OTHER"])
+    wrong = len(categorized["EXCLUDED / WRONG JOHNNY"])
+    garbage = len(categorized["SEARCH RESULT / LOW-VALUE PAGE"])
+    jackass_reader = len(
+        categorized["JACKASS + READER/OC - JOHNNY UNCLEAR"]
+    )
+    jackass_fic = len(
+        categorized["JACKASS FIC - JOHNNY UNCLEAR"]
+    )
+
+    print(
+        f"Strong Knoxville + Reader/OC: {strong}"
+    )
+    print(
+        f"Knoxville fic/imagine:         {fic}"
+    )
+    print(
+        f"Knoxville other:               {other}"
+    )
+    print(
+        f"Wrong Johnny:                  {wrong}"
+    )
+    print(
+        f"Search-result/low-value:       {garbage}"
+    )
+    print(
+        f"Jackass + Reader/OC unclear:   {jackass_reader}"
+    )
+    print(
+        f"Jackass fic unclear:           {jackass_fic}"
+    )
+
+    print()
+
+    if strong >= 100:
+        print(
+            "RESULT: You have a substantial pool of likely "
+            "Johnny Knoxville + Reader/OC material."
+        )
+    elif strong >= 50:
+        print(
+            "RESULT: You have a useful pool of likely "
+            "Johnny Knoxville + Reader/OC material."
+        )
     else:
-        print("No obvious stored search/query metadata found.")
+        print(
+            "RESULT: The main Knoxville + Reader/OC pool is "
+            "still relatively small."
+        )
 
-    # Field structure
-    print_section("POST DATA STRUCTURE")
-
-    all_keys = Counter()
-
-    for post in posts:
-        if isinstance(post, dict):
-            for key in post.keys():
-                all_keys[key] += 1
-
-    print("Fields found across posts:")
-
-    for key, count in all_keys.most_common():
-        print(f"{key}: {count}/{len(posts)}")
-
-    # Final summary
-    print_section("AUDIT SUMMARY")
-
-    duplicate_count = len(nonempty_urls) - len(unique_urls)
-
-    strong_count = (
-        class_counter.get("STRONG: Johnny + Reader", 0)
-        + class_counter.get("STRONG: Johnny + Fic", 0)
+    print()
+    print(
+        "NEXT STEP: Review the examples above before increasing "
+        "MAX_SPLIT_DEPTH."
     )
-
-    possible_count = (
-        class_counter.get("POSSIBLE: Jackass + Reader", 0)
-        + class_counter.get("POSSIBLE: Jackass + Fic", 0)
-        + class_counter.get("POSSIBLE", 0)
-    )
-
-    weak_count = class_counter.get("WEAK: Subject only", 0)
-    unlikely_count = class_counter.get("UNLIKELY", 0)
-
-    print(f"Total records:             {len(posts)}")
-    print(f"Unique URLs:               {len(unique_urls)}")
-    print(f"Duplicate URL records:    {duplicate_count}")
-    print(f"Strongly relevant:         {strong_count}")
-    print(f"Possibly relevant:         {possible_count}")
-    print(f"Weak/uncertain:            {weak_count}")
-    print(f"Unlikely:                  {unlikely_count}")
-
-    if dated_posts:
-        print(f"Date range:                {dated_posts[0][0]} -> {dated_posts[-1][0]}")
 
     print()
     print("Audit complete.")
-    print("This script did NOT modify posts.json, site/feed.xml, or site/index.html.")
+    print()
+    print(
+        "This script did NOT modify posts.json, site/feed.xml, "
+        "or site/index.html."
+    )
 
 
 if __name__ == "__main__":
