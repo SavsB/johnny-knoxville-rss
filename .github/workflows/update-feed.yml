@@ -1,8 +1,14 @@
 name: Update Tumblr RSS Feed
 
 on:
-  
+  schedule:
+    - cron: "0 */6 * * *"
+
   workflow_dispatch:
+
+  push:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -14,13 +20,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-
   update-feed:
-
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
@@ -31,14 +34,10 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Run Tumblr dataset audit
-        run: |
-          python audit.py
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --disable-pip-version-check -r requirements.txt
+          pip install -r requirements.txt
 
       - name: Generate RSS feed
         run: |
@@ -58,9 +57,7 @@ jobs:
           git add site/feed.xml
           git add site/index.html
           git add posts.json
-          git add tumblr_debug.html
           git add search_state.json
-          Add Tumblr dataset audit
 
           if git diff --cached --quiet; then
             echo "No changes to commit."
