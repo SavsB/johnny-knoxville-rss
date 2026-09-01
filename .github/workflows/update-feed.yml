@@ -31,6 +31,10 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Run Tumblr dataset audit
+        run: |
+          python audit.py
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -56,6 +60,7 @@ jobs:
           git add posts.json
           git add tumblr_debug.html
           git add search_state.json
+          Add Tumblr dataset audit
 
           if git diff --cached --quiet; then
             echo "No changes to commit."
