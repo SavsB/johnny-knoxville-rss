@@ -9,6 +9,10 @@ from urllib.parse import quote
 from xml.etree import ElementTree as ET
 
 
+# ============================================================
+# SETTINGS
+# ============================================================
+
 QUERIES = [
     "johnny knoxville x reader",
     "johnny knoxville reader",
@@ -19,11 +23,21 @@ QUERIES = [
 ]
 
 POSTS_FILE = "posts.json"
+
 SITE_DIR = "site"
-FEED_FILE = os.path.join(SITE_DIR, "feed.xml")
-INDEX_FILE = os.path.join(SITE_DIR, "index.html")
+
+FEED_FILE = os.path.join(
+    SITE_DIR,
+    "feed.xml"
+)
+
+INDEX_FILE = os.path.join(
+    SITE_DIR,
+    "index.html"
+)
 
 MAX_POSTS = 500
+
 
 HEADERS = {
     "User-Agent": (
@@ -34,25 +48,45 @@ HEADERS = {
 }
 
 
+# ============================================================
+# LOAD / SAVE DATABASE
+# ============================================================
+
 def load_posts():
+
     if not os.path.exists(POSTS_FILE):
         return []
 
     try:
-        with open(POSTS_FILE, "r", encoding="utf-8") as f:
+
+        with open(
+            POSTS_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
             data = json.load(f)
 
         if isinstance(data, list):
             return data
 
     except Exception as e:
-        print(f"Could not read posts.json: {e}")
+
+        print(
+            f"Could not read posts.json: {e}"
+        )
 
     return []
 
 
 def save_posts(posts):
-    with open(POSTS_FILE, "w", encoding="utf-8") as f:
+
+    with open(
+        POSTS_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
         json.dump(
             posts,
             f,
@@ -61,21 +95,33 @@ def save_posts(posts):
         )
 
 
+# ============================================================
+# TEXT CLEANING
+# ============================================================
+
 def clean_text(text):
+
     if not text:
         return ""
 
-    text = html.unescape(str(text))
-    text = re.sub(r"\s+", " ", text)
+    text = html.unescape(
+        str(text)
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
 
     return text.strip()
 
 
+# ============================================================
+# FIND TUMBLR POSTS INSIDE INITIAL JSON
+# ============================================================
+
 def find_posts(data):
-    """
-    Recursively search Tumblr's JSON for objects
-    representing posts.
-    """
 
     posts = []
 
@@ -85,55 +131,176 @@ def find_posts(data):
             data.get("objectType") == "post"
             and data.get("postUrl")
         ):
+
             posts.append(data)
 
         for value in data.values():
-            posts.extend(find_posts(value))
+
+            posts.extend(
+                find_posts(value)
+            )
 
     elif isinstance(data, list):
 
         for item in data:
-            posts.extend(find_posts(item))
+
+            posts.extend(
+                find_posts(item)
+            )
 
     return posts
 
 
-def get_post_title(post):
+# ============================================================
+# EXTRACT POST TEXT
+# ============================================================
 
-    summary = clean_text(
-        post.get("summary", "")
+def get_post_text(post):
+
+    content = post.get(
+        "content",
+        []
     )
 
-    if summary:
-        return summary[:200]
+    if not isinstance(content, list):
+        return ""
 
-    content = post.get("content", [])
+    pieces = []
 
+    for block in content:
+
+        if not isinstance(block, dict):
+            continue
+
+        text = block.get(
+            "text",
+            ""
+        )
+
+        if text:
+
+            text = clean_text(
+                text
+            )
+
+            if text:
+                pieces.append(text)
+
+    return " ".join(pieces)
+
+
+# ============================================================
+# GET TITLE
+# ============================================================
+
+def get_post_title(post):
+
+    content = post.get(
+        "content",
+        []
+    )
+
+    # First look for Tumblr heading blocks.
     if isinstance(content, list):
 
         for block in content:
 
-            if (
-                isinstance(block, dict)
-                and block.get("type") == "text"
+            if not isinstance(block, dict):
+                continue
+
+            subtype = block.get(
+                "subtype",
+                ""
+            )
+
+            if subtype in (
+                "heading1",
+                "heading2",
+                "heading3"
             ):
 
                 text = clean_text(
-                    block.get("text", "")
+                    block.get(
+                        "text",
+                        ""
+                    )
                 )
 
                 if text:
                     return text[:200]
 
+    # Tumblr's summary is usually a good fallback.
+    summary = clean_text(
+        post.get(
+            "summary",
+            ""
+        )
+    )
+
+    if summary:
+        return summary[:200]
+
+    # Try the first text block.
+    if isinstance(content, list):
+
+        for block in content:
+
+            if not isinstance(block, dict):
+                continue
+
+            if block.get("type") == "text":
+
+                text = clean_text(
+                    block.get(
+                        "text",
+                        ""
+                    )
+                )
+
+                if text:
+                    return text[:200]
+
+    # Last fallback: Tumblr slug.
     slug = clean_text(
-        post.get("slug", "")
+        post.get(
+            "slug",
+            ""
+        )
     )
 
     if slug:
-        return slug.replace("-", " ")[:200]
+
+        return slug.replace(
+            "-",
+            " "
+        )[:200]
 
     return "Tumblr post"
 
+
+# ============================================================
+# GET SHORT EXCERPT
+# ============================================================
+
+def get_post_excerpt(post):
+
+    text = get_post_text(
+        post
+    )
+
+    if not text:
+        return ""
+
+    # Keep RSS descriptions reasonably short.
+    if len(text) > 400:
+        text = text[:400].rstrip() + "..."
+
+    return text
+
+
+# ============================================================
+# EXTRACT TUMBLR INITIAL JSON
+# ============================================================
 
 def extract_initial_state(html_text):
 
@@ -151,21 +318,32 @@ def extract_initial_state(html_text):
     )
 
     if not script:
+
         print(
             "Could not find "
             "___INITIAL_STATE___ JSON."
         )
+
         return None
 
     try:
-        return json.loads(script.string)
+
+        return json.loads(
+            script.string
+        )
 
     except Exception as e:
+
         print(
             f"Could not parse initial JSON: {e}"
         )
+
         return None
 
+
+# ============================================================
+# SEARCH TUMBLR
+# ============================================================
 
 def search_tumblr(query):
 
@@ -176,8 +354,12 @@ def search_tumblr(query):
 
     print()
     print("=" * 50)
-    print(f"Searching: {query}")
-    print(f"URL: {url}")
+    print(
+        f"Searching: {query}"
+    )
+    print(
+        f"URL: {url}"
+    )
 
     try:
 
@@ -197,15 +379,24 @@ def search_tumblr(query):
             f"{len(response.text)}"
         )
 
+        # Save the latest Tumblr response
+        # for troubleshooting.
         with open(
             "tumblr_debug.html",
             "w",
             encoding="utf-8"
         ) as f:
-            f.write(response.text)
+
+            f.write(
+                response.text
+            )
 
         if response.status_code != 200:
-            print("Search request failed.")
+
+            print(
+                "Search request failed."
+            )
+
             return []
 
         state = extract_initial_state(
@@ -215,7 +406,9 @@ def search_tumblr(query):
         if not state:
             return []
 
-        raw_posts = find_posts(state)
+        raw_posts = find_posts(
+            state
+        )
 
         print(
             f"Found {len(raw_posts)} "
@@ -223,6 +416,7 @@ def search_tumblr(query):
         )
 
         results = []
+
         seen = set()
 
         for post in raw_posts:
@@ -235,21 +429,36 @@ def search_tumblr(query):
             if not post_url:
                 continue
 
-            post_url = post_url.split("?")[0]
+            # Remove query strings.
+            post_url = post_url.split(
+                "?"
+            )[0]
 
             if post_url in seen:
                 continue
 
-            seen.add(post_url)
+            seen.add(
+                post_url
+            )
 
             results.append({
                 "url": post_url,
-                "title": get_post_title(post),
+
+                "title": get_post_title(
+                    post
+                ),
+
+                "excerpt": get_post_excerpt(
+                    post
+                ),
+
                 "query": query,
+
                 "timestamp": post.get(
                     "timestamp",
                     0
                 ),
+
                 "blog": post.get(
                     "blogName",
                     ""
@@ -272,24 +481,35 @@ def search_tumblr(query):
         return []
 
 
+# ============================================================
+# MERGE OLD + NEW POSTS
+# ============================================================
+
 def merge_posts(existing, new_posts):
 
     posts_by_url = {}
 
-    # Add all existing posts first.
+    # IMPORTANT:
+    # Start with ALL existing posts.
+    # This prevents the database from being
+    # replaced by only the newest search results.
+
     for post in existing:
 
-        url = post.get("url")
+        url = post.get(
+            "url"
+        )
 
         if url:
             posts_by_url[url] = post
 
     new_count = 0
 
-    # Add only genuinely new posts.
     for post in new_posts:
 
-        url = post.get("url")
+        url = post.get(
+            "url"
+        )
 
         if not url:
             continue
@@ -301,59 +521,106 @@ def merge_posts(existing, new_posts):
             ).isoformat()
 
             posts_by_url[url] = post
+
             new_count += 1
 
         else:
 
-            # Keep the old post, but improve missing information.
-            existing_post = posts_by_url[url]
+            existing_post = posts_by_url[
+                url
+            ]
 
-            new_title = post.get("title", "")
+            # Update title if the new version
+            # has a useful one.
+            new_title = post.get(
+                "title",
+                ""
+            )
 
             if (
                 new_title
                 and new_title != "Tumblr post"
-                and (
-                    not existing_post.get("title")
-                    or existing_post.get("title") == "Tumblr post"
+            ):
+
+                existing_post["title"] = (
+                    new_title
                 )
-            ):
-                existing_post["title"] = new_title
 
-            if (
-                not existing_post.get("timestamp")
-                and post.get("timestamp")
-            ):
-                existing_post["timestamp"] = post["timestamp"]
+            # Update excerpt if available.
+            new_excerpt = post.get(
+                "excerpt",
+                ""
+            )
 
-            if (
-                not existing_post.get("blog")
-                and post.get("blog")
-            ):
-                existing_post["blog"] = post["blog"]
+            if new_excerpt:
 
-    posts = list(posts_by_url.values())
+                existing_post[
+                    "excerpt"
+                ] = new_excerpt
 
-    # Sort newest Tumblr posts first.
+    posts = list(
+        posts_by_url.values()
+    )
+
+    # Newest first.
     posts.sort(
-        key=lambda post: int(
-            post.get("timestamp", 0) or 0
+        key=lambda x: (
+            x.get(
+                "timestamp",
+                0
+            ),
+            x.get(
+                "added",
+                ""
+            )
         ),
         reverse=True
     )
 
-    print(f"New posts added: {new_count}")
+    print(
+        f"Existing posts preserved: "
+        f"{len(existing)}"
+    )
 
-    # IMPORTANT:
-    # Do not accidentally shrink the database.
+    print(
+        f"New posts added: "
+        f"{new_count}"
+    )
+
+    print(
+        f"Total after merge: "
+        f"{len(posts)}"
+    )
+
     return posts[:MAX_POSTS]
 
+
+# ============================================================
+# CREATE RSS XML
+# ============================================================
 
 def make_rss(posts):
 
     os.makedirs(
         SITE_DIR,
         exist_ok=True
+    )
+
+    # IMPORTANT:
+    # Register the Atom namespace before creating
+    # the XML document.
+    #
+    # Without this, ElementTree can produce:
+    #
+    #   <ns0:link>
+    #
+    # Instead we want:
+    #
+    #   <atom:link>
+    #
+    ET.register_namespace(
+        "atom",
+        "http://www.w3.org/2005/Atom"
     )
 
     rss = ET.Element(
@@ -398,6 +665,7 @@ def make_rss(posts):
         "language"
     ).text = "en"
 
+    # Atom self-link.
     ET.SubElement(
         channel,
         "{http://www.w3.org/2005/Atom}link",
@@ -410,6 +678,10 @@ def make_rss(posts):
             "type": "application/rss+xml"
         }
     )
+
+    # ========================================================
+    # RSS ITEMS
+    # ========================================================
 
     for post in posts:
 
@@ -441,23 +713,44 @@ def make_rss(posts):
         ET.SubElement(
             item,
             "guid",
-            {"isPermaLink": "true"}
+            {
+                "isPermaLink": "true"
+            }
         ).text = url
 
         description_parts = []
 
-        blog = post.get("blog", "")
+        blog = post.get(
+            "blog",
+            ""
+        )
 
         if blog:
+
             description_parts.append(
                 f"Blog: {blog}"
             )
 
-        query = post.get("query", "")
+        query = post.get(
+            "query",
+            ""
+        )
 
         if query:
+
             description_parts.append(
                 f"Found via: {query}"
+            )
+
+        excerpt = post.get(
+            "excerpt",
+            ""
+        )
+
+        if excerpt:
+
+            description_parts.append(
+                excerpt
             )
 
         ET.SubElement(
@@ -491,7 +784,13 @@ def make_rss(posts):
             except Exception:
                 pass
 
-    tree = ET.ElementTree(rss)
+    # ========================================================
+    # WRITE XML
+    # ========================================================
+
+    tree = ET.ElementTree(
+        rss
+    )
 
     ET.indent(
         tree,
@@ -509,6 +808,10 @@ def make_rss(posts):
         f"{len(posts)} posts."
     )
 
+
+# ============================================================
+# CREATE HTML INDEX
+# ============================================================
 
 def make_index(posts):
 
@@ -529,12 +832,18 @@ def make_index(posts):
         )
 
         url = html.escape(
-            post.get("url", ""),
+            post.get(
+                "url",
+                ""
+            ),
             quote=True
         )
 
         blog = html.escape(
-            post.get("blog", "")
+            post.get(
+                "blog",
+                ""
+            )
         )
 
         rows.append(
@@ -602,8 +911,14 @@ Posts currently stored:
         encoding="utf-8"
     ) as f:
 
-        f.write(page)
+        f.write(
+            page
+        )
 
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
 
@@ -623,11 +938,17 @@ def main():
 
     for query in QUERIES:
 
-        results = search_tumblr(query)
+        results = search_tumblr(
+            query
+        )
 
-        all_new.extend(results)
+        all_new.extend(
+            results
+        )
 
-    total_found = len(all_new)
+    total_found = len(
+        all_new
+    )
 
     print()
     print("=" * 50)
@@ -639,9 +960,9 @@ def main():
 
     print("=" * 50)
 
-    # Important safety feature:
-    # Never erase your database if Tumblr
-    # suddenly returns no results.
+    # ========================================================
+    # SAFETY CHECK
+    # ========================================================
 
     if total_found == 0:
 
@@ -663,7 +984,26 @@ def main():
             all_new
         )
 
-        save_posts(posts)
+        # NEVER allow the database to shrink.
+        if len(posts) < len(existing):
+
+            print()
+            print(
+                "ERROR: Merged database is "
+                "smaller than existing database."
+            )
+
+            print(
+                "Refusing to overwrite posts.json."
+            )
+
+            posts = existing
+
+        else:
+
+            save_posts(
+                posts
+            )
 
     print()
 
@@ -672,11 +1012,18 @@ def main():
         f"{len(posts)}"
     )
 
-    make_rss(posts)
-    make_index(posts)
+    make_rss(
+        posts
+    )
+
+    make_index(
+        posts
+    )
 
     print()
-    print("===== COMPLETE =====")
+    print(
+        "===== COMPLETE ====="
+    )
 
 
 if __name__ == "__main__":
