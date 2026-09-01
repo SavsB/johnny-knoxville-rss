@@ -487,114 +487,68 @@ def search_tumblr(query):
 
 def merge_posts(existing, new_posts):
 
-    posts_by_url = {}
+    # Start with a complete copy of the existing database.
+    merged = list(existing)
 
-    # IMPORTANT:
-    # Start with ALL existing posts.
-    # This prevents the database from being
-    # replaced by only the newest search results.
+    # Build a set of existing URLs for duplicate checking.
+    existing_urls = set()
 
     for post in existing:
 
-        url = post.get(
-            "url"
-        )
+        url = post.get("url", "").strip()
 
         if url:
-            posts_by_url[url] = post
+            existing_urls.add(url)
 
     new_count = 0
 
     for post in new_posts:
 
-        url = post.get(
-            "url"
-        )
+        url = post.get("url", "").strip()
 
         if not url:
             continue
 
-        if url not in posts_by_url:
+        # Only add posts that aren't already stored.
+        if url not in existing_urls:
 
             post["added"] = datetime.now(
                 timezone.utc
             ).isoformat()
 
-            posts_by_url[url] = post
+            merged.append(post)
+
+            existing_urls.add(url)
 
             new_count += 1
 
-        else:
+    # Sort by Tumblr timestamp, newest first.
+    def sort_key(post):
 
-            existing_post = posts_by_url[
-                url
-            ]
+        try:
+            return int(post.get("timestamp", 0) or 0)
+        except (ValueError, TypeError):
+            return 0
 
-            # Update title if the new version
-            # has a useful one.
-            new_title = post.get(
-                "title",
-                ""
-            )
-
-            if (
-                new_title
-                and new_title != "Tumblr post"
-            ):
-
-                existing_post["title"] = (
-                    new_title
-                )
-
-            # Update excerpt if available.
-            new_excerpt = post.get(
-                "excerpt",
-                ""
-            )
-
-            if new_excerpt:
-
-                existing_post[
-                    "excerpt"
-                ] = new_excerpt
-
-    posts = list(
-        posts_by_url.values()
-    )
-
-    # Newest first.
-    posts.sort(
-        key=lambda x: (
-            x.get(
-                "timestamp",
-                0
-            ),
-            x.get(
-                "added",
-                ""
-            )
-        ),
+    merged.sort(
+        key=sort_key,
         reverse=True
     )
 
     print(
-        f"Existing posts preserved: "
-        f"{len(existing)}"
+        f"Existing posts preserved: {len(existing)}"
     )
 
     print(
-        f"New posts added: "
-        f"{new_count}"
+        f"New posts added: {new_count}"
     )
 
     print(
-        f"Total after merge: "
-        f"{len(posts)}"
+        f"Total after merge: {len(merged)}"
     )
 
-    return posts[:MAX_POSTS]
-
-
+    # Only limit the feed/database if it exceeds MAX_POSTS.
+    return merged[:MAX_POSTS]
 # ============================================================
 # CREATE RSS XML
 # ============================================================
