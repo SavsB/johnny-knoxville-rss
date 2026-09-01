@@ -62,15 +62,11 @@ def clean_text(text):
 
     text = html.unescape(text)
     text = re.sub(r"\s+", " ", text)
+
     return text.strip()
 
 
 def extract_post_links(soup):
-    """
-    Extract Tumblr post URLs using the same general approach
-    as the scraper that previously found the 115 posts.
-    """
-
     found = set()
 
     for tag in soup.find_all(href=True):
@@ -80,39 +76,37 @@ def extract_post_links(soup):
         if not href:
             continue
 
-        # Absolute Tumblr URL
         if href.startswith("https://www.tumblr.com/"):
             url = href
 
-        # Relative Tumblr URL
         elif href.startswith("/"):
             url = "https://www.tumblr.com" + href
 
         else:
             continue
 
-        # Tumblr post URLs
-        if "/post/" in url:
-            url = url.split("?")[0]
-            url = url.split("#")[0]
+        if "/post/" not in url:
+            continue
 
-            found.add(url)
+        url = url.split("?")[0]
+        url = url.split("#")[0]
+
+        found.add(url)
 
     return list(found)
 
 
 def get_title(link):
-    """
-    Try to get useful text associated with the post link.
-    """
+    if not link:
+        return "Tumblr post"
 
-    # Text directly inside the link
-    text = clean_text(link.get_text(" ", strip=True))
+    text = clean_text(
+        link.get_text(" ", strip=True)
+    )
 
     if text and len(text) > 3:
         return text[:200]
 
-    # Try nearby parent text
     parent = link.parent
 
     if parent:
@@ -144,6 +138,23 @@ def search_tumblr(query):
         )
 
         print(f"HTTP status: {response.status_code}")
+        print(f"Response length: {len(response.text)}")
+        print(
+            f"Contains /post/: "
+            f"{'/post/' in response.text}"
+        )
+        print(
+            f"Contains Tumblr: "
+            f"{'tumblr' in response.text.lower()}"
+        )
+
+        # Save Tumblr's response for debugging.
+        with open(
+            "tumblr_debug.html",
+            "w",
+            encoding="utf-8"
+        ) as f:
+            f.write(response.text)
 
         if response.status_code != 200:
             print("Search request failed.")
@@ -154,14 +165,6 @@ def search_tumblr(query):
             "html.parser"
         )
 
-        print("Response length:", len(response.text))
-print("Contains /post/:", "/post/" in response.text)
-print("Contains Tumblr:", "tumblr" in response.text.lower())
-
-with open("tumblr_debug.html", "w", encoding="utf-8") as f:
-    f.write(response.text)
-
-        # Use the working post-link extraction method.
         post_urls = extract_post_links(soup)
 
         print(
@@ -170,23 +173,20 @@ with open("tumblr_debug.html", "w", encoding="utf-8") as f:
 
         results = []
 
-        # Locate the corresponding anchor so we can
-        # attempt to extract useful text.
-        for url in post_urls:
+        for post_url in post_urls:
 
             link = soup.find(
                 "a",
                 href=lambda href:
-                    href and (
-                        href.split("?")[0].split("#")[0]
-                        == url
-                    )
+                    href and
+                    href.split("?")[0].split("#")[0]
+                    == post_url
             )
 
-            title = get_title(link) if link else "Tumblr post"
+            title = get_title(link)
 
             results.append({
-                "url": url,
+                "url": post_url,
                 "title": title,
                 "query": query,
             })
@@ -202,7 +202,6 @@ def merge_posts(existing, new_posts):
 
     posts_by_url = {}
 
-    # Keep everything already saved.
     for post in existing:
 
         url = post.get("url")
@@ -210,7 +209,6 @@ def merge_posts(existing, new_posts):
         if url:
             posts_by_url[url] = post
 
-    # Add newly discovered posts.
     for post in new_posts:
 
         url = post.get("url")
@@ -222,10 +220,15 @@ def merge_posts(existing, new_posts):
 
             existing_post = posts_by_url[url]
 
-            # Update title only if we found
-            # something more useful.
-            new_title = post.get("title", "")
-            old_title = existing_post.get("title", "")
+            old_title = existing_post.get(
+                "title",
+                ""
+            )
+
+            new_title = post.get(
+                "title",
+                ""
+            )
 
             if (
                 new_title
@@ -247,7 +250,6 @@ def merge_posts(existing, new_posts):
 
     posts = list(posts_by_url.values())
 
-    # Newest discovered posts first.
     posts.sort(
         key=lambda x: x.get("added", ""),
         reverse=True
@@ -525,10 +527,8 @@ def main():
         f"{total_found}"
     )
 
-    # SAFETY CHECK:
-    #
-    # If Tumblr gives us zero results,
-    # DO NOT destroy the existing database.
+    # Never destroy the existing database
+    # if Tumblr returns no results.
     if total_found == 0:
 
         print()
