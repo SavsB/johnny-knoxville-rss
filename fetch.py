@@ -14,12 +14,19 @@ from xml.etree import ElementTree as ET
 # ============================================================
 
 QUERIES = [
-    "johnny knoxville x reader",
     "johnny knoxville reader",
     "johnny knoxville imagine",
     "johnny knoxville fic",
     "johnny knoxville fanfiction",
     "johnny knoxville x oc",
+    "johnny knoxville oneshot",
+    "johnny knoxville one shot",
+    "johnny knoxville writing",
+    "johnny knoxville story",
+    "jackass x reader",
+    "jackass reader",
+    "johnny x reader",
+    "johnny x oc",
 ]
 
 POSTS_FILE = "posts.json"
@@ -404,6 +411,7 @@ def search_tumblr(query):
         )
 
         if not state:
+
             return []
 
         raw_posts = find_posts(
@@ -416,7 +424,6 @@ def search_tumblr(query):
         )
 
         results = []
-
         seen = set()
 
         for post in raw_posts:
@@ -427,21 +434,78 @@ def search_tumblr(query):
             )
 
             if not post_url:
+
                 continue
 
-            # Remove query strings.
             post_url = post_url.split(
                 "?"
             )[0]
 
             if post_url in seen:
+
                 continue
 
             seen.add(
                 post_url
             )
 
+            # ------------------------------------------------
+            # Tumblr tags
+            # ------------------------------------------------
+
+            tags = post.get(
+                "tags",
+                []
+            )
+
+            tag_text = ""
+
+            if isinstance(tags, list):
+
+                tag_text = " ".join(
+                    str(tag)
+                    for tag in tags
+                ).lower()
+
+            elif isinstance(tags, str):
+
+                tag_text = tags.lower()
+
+            # ------------------------------------------------
+            # Tumblr post text
+            # ------------------------------------------------
+
+            post_text = get_post_text(
+                post
+            ).lower()
+
+            summary = clean_text(
+                post.get(
+                    "summary",
+                    ""
+                )
+            ).lower()
+
+            searchable_text = " ".join([
+                tag_text,
+                post_text,
+                summary
+            ])
+
+            # ------------------------------------------------
+            # Relevance detection
+            # ------------------------------------------------
+            #
+            # We don't reject posts here based on the query.
+            #
+            # Tumblr already performed the search.
+            #
+            # These values are stored so we can later see
+            # why the post was discovered.
+            # ------------------------------------------------
+
             results.append({
+
                 "url": post_url,
 
                 "title": get_post_title(
@@ -463,6 +527,8 @@ def search_tumblr(query):
                     "blogName",
                     ""
                 ),
+
+                "tags": tags,
             })
 
         print(
@@ -479,7 +545,6 @@ def search_tumblr(query):
         )
 
         return []
-
 
 # ============================================================
 # MERGE OLD + NEW POSTS
